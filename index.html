@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>無音区間オートカット（ブラウザだけ / ffmpeg.wasm）</title>
+  <style>
+    :root{ --bg:#0b0d10;--panel:#12161b;--muted:#8aa0b2;--text:#eaf2f9;--accent:#4aa3ff;--accent-2:#6ce1a6;--warn:#ffb86b;--err:#ff6b6b; }
+    *{box-sizing:border-box}body{margin:0;font:15px/1.6 system-ui,-apple-system,Segoe UI,Roboto,"Hiragino Sans","Noto Sans JP",Arial,sans-serif;background:var(--bg);color:var(--text)}
+    header{padding:18px 20px;border-bottom:1px solid #1f2831;background:linear-gradient(180deg,#0d1117,#0a0e13)}
+    h1{font-size:18px;margin:0}
+    .container{max-width:1100px;margin:0 auto;padding:18px}
+    .grid{display:grid;grid-template-columns:1.1fr .9fr;gap:16px}
+    video{width:100%;max-height:320px;background:#0c1116;border:1px solid #1e2a34;border-radius:10px;display:block}
+    .card{background:var(--panel);border:1px solid #1e2a34;border-radius:14px;box-shadow:0 4px 24px rgba(0,0,0,.25)}
+    .card h2{margin:0;padding:14px 16px;border-bottom:1px solid #1e2a34;font-size:16px}
+    .card .body{padding:14px 16px}
+    .row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+    label{font-weight:600;color:#d5e2ee}
+    input[type="file"]{padding:10px;border:1px dashed #2a3a47;border-radius:10px;background:#0e1318;color:#ddd}
+    .controls{display:grid;gap:10px}
+    .control{display:grid;grid-template-columns:160px 1fr auto;gap:10px;align-items:center}
+    .control input[type=range]{width:100%}
+    .hint{color:var(--muted);font-size:12px}
+    button{appearance:none;border:none;border-radius:12px;padding:10px 14px;font-weight:700;cursor:pointer;background:var(--accent);color:#001e36;transition:transform .04s ease,opacity .2s}
+    button.secondary{background:#1e2a34;color:#cfe6ff}
+    button:disabled{opacity:.5;cursor:not-allowed}
+    .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;font-size:12px}
+    .progress{height:10px;background:#0c1116;border:1px solid #1e2a34;border-radius:999px;overflow:hidden}
+    .progress>span{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--accent),var(--accent-2));transition:width .2s}
+    canvas{display:block;width:100%;height:140px;background:#0c1116;border:1px solid #1e2a34;border-radius:10px;cursor:crosshair}
+    .badge{display:inline-block;padding:2px 8px;border:1px solid #34485a;border-radius:999px;font-size:12px;color:#c7d7e5;background:#0e151b}
+    .pill{display:inline-flex;gap:6px;align-items:center;padding:6px 10px;background:#0e141a;border:1px solid #1e2a34;border-radius:999px}
+    .footer{color:#8aa0b2;font-size:12px;padding:14px}
+    .seglist{max-height:180px;overflow:auto;border:1px solid #1e2a34;border-radius:10px;padding:8px;background:#0e1318}
+    .seglist div{padding:4px 6px;border-bottom:1px dashed #1e2a34}
+    .seglist div:last-child{border-bottom:none}
+    .error{color:var(--err)}
+    .ok{color:var(--accent-2)}
+    @media (max-width:960px){.grid{grid-template-columns:1fr}}
+  </style>
+</head>
+<body>
+  <header>
+    <div class="container row" style="justify-content:space-between">
+      <h1>🎬 無音カット自動化（ブラウザだけで完結）</h1>
+      <div class="pill"><span class="badge">Free</span><span class="badge">Client‑side</span><span class="badge">Safari/Chrome</span></div>
+    </div>
+  </header>
+
+  <div class="container grid">
+    <section class="card">
+      <h2>① 動画を選択 & 解析 / ライブプレビュー</h2>
+      <div class="body">
+        <div class="row" style="justify-content:space-between">
+          <div>
+            <label for="file">入力動画（iPad/PCから）</label><br>
+            <input type="file" id="file" accept="video/*" />
+            <div class="hint">大きな動画は端末メモリを多く消費します（推奨: 20分・1GB以下）。</div>
+          </div>
+          <div>
+            <button id="analyzeBtn" class="secondary" disabled>音量を解析する</button>
+          </div>
+        </div>
+
+        <div style="margin-top:12px">
+          <canvas id="wave" title="クリックでシーク / ドラッグで区間ズーム（ダブルクリックでズーム解除）"></canvas>
+          <div class="hint">波形は <span class="mono">dBFS</span>（0=最大、負の値=小さい）。<b>青線=しきい値</b>、<b>緑帯=保持区間</b>。クリックでその時刻へ移動できます。</div>
+        </div>
+
+        <div class="controls" style="margin-top:12px">
+          <div class="control">
+            <label>しきい値（dBFS）</label>
+            <input type="range" id="thresh" min="-90" max="0" step="1" value="-40" />
+            <span id="threshVal" class="mono">-40 dB</span>
+          </div>
+          <div class="control">
+            <label>最小無音長（ms）</label>
+            <input type="range" id="minSil" min="50" max="4000" step="50" value="300" />
+            <span id="minSilVal" class="mono">300 ms</span>
+          </div>
+          <div class="control">
+            <label>前後パディング（ms）</label>
+            <input type="range" id="pad" min="0" max="1000" step="50" value="120" />
+            <span id="padVal" class="mono">120 ms</span>
+          </div>
+          <div class="control">
+            <label>解析窓幅（ms）</label>
+            <input type="range" id="win" min="10" max="200" step="10" value="40" />
+            <span id="winVal" class="mono">40 ms</span>
+          </div>
+          <div class="control">
+            <label>ライブ再解析</label>
+            <label class="row" style="gap:8px"><input type="checkbox" id="live" checked> スライダー操作で即プレビュー更新</label>
+            <span class="hint">負荷が高い場合はOFFにしてください</span>
+          </div>
+        </div>
+
+        <div class="row" style="margin-top:8px;justify-content:space-between;align-items:center">
+          <label class="row" style="gap:8px"><input type="checkbox" id="previewToggle" disabled> プレビューで無音をスキップ</label>
+          <div class="row" style="gap:8px">
+            <button id="previewStart" class="secondary" disabled>▶ 再生</button>
+            <button id="previewStop" class="secondary" disabled>⏸ 停止</button>
+          </div>
+        </div>
+        <video id="player" controls playsinline preload="metadata" muted></video>
+        <div class="hint">もしプレビューできない場合（例: Windows Chrome で iPhone/iPadのHEVC動画）は、下の「互換プレビューを作成」を押してください。</div>
+        <div style="margin-top:6px"><button id="makeProxyBtn" class="secondary" style="display:none">互換プレビューを作成（H.264 低解像度）</button> <span id="proxyHint" class="hint"></span></div>
+        <div class="hint">プレビューは<b>再エンコードせず</b>に保持区間のみを連続再生します（スキップ再生）。</div>
+
+        <div style="margin-top:8px" class="row">
+          <button id="recalcBtn" class="secondary" disabled>手動で再計算</button>
+          <span id="analysisMeta" class="hint"></span>
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>② 自動カット & 書き出し（ffmpeg.wasm 使用）</h2>
+      <div class="body">
+        <div class="row" style="justify-content:space-between">
+          <button id="cutBtn" disabled>無音をカットして書き出し</button>
+          <div class="row" style="gap:8px">
+            <span class="badge">H.264 + AAC</span>
+            <span class="badge">可変レート</span>
+          </div>
+        </div>
+
+        <div class="row" style="margin-top:10px;gap:14px;align-items:flex-end">
+          <div>
+            <label>出力ファイル名</label><br>
+            <input id="outNameInput" type="text" value="cut_output.mp4" style="width:260px;padding:8px;border-radius:10px;border:1px solid #1e2a34;background:#0e1318;color:#eaf2f9" />
+            <div class="hint">拡張子は <span class="mono">.mp4</span> 推奨</div>
+          </div>
+          <div>
+            <label>画質（CRF）</label><br>
+            <input type="range" id="crf" min="18" max="30" step="1" value="22" style="width:220px" />
+            <span id="crfVal" class="mono">CRF 22</span>
+            <div class="hint">小さいほど高画質・ファイル大</div>
+          </div>
+          <div>
+            <label>プリセット</label><br>
+            <select id="preset" style="padding:8px;border-radius:10px;border:1px solid #1e2a34;background:#0e1318;color:#eaf2f9">
+              <option value="veryfast" selected>veryfast</option>
+              <option value="faster">faster</option>
+              <option value="fast">fast</option>
+              <option value="medium">medium</option>
+            </select>
+          </div>
+          <div>
+            <label>音声ビットレート</label><br>
+            <select id="abitrate" style="padding:8px;border-radius:10px;border:1px solid #1e2a34;background:#0e1318;color:#eaf2f9">
+              <option value="128k">128k</option>
+              <option value="160k">160k</option>
+              <option value="192k" selected>192k</option>
+              <option value="256k">256k</option>
+            </select>
+          </div>
+        </div>
+
+        <div style="margin:10px 0" class="progress"><span id="prog"></span></div>
+        <div id="log" class="mono hint" style="white-space:pre-wrap;max-height:140px;overflow:auto"></div>
+
+        <h3 style="margin:12px 0 6px">保持区間（音があると判断）</h3>
+        <div id="segList" class="seglist hint">解析後に表示されます…</div>
+
+        <div id="outWrap" style="margin-top:12px"></div>
+        <div class="footer">※ すべて端末内で処理します。アップロードは行いません。</div>
+      </div>
+    </section>
+  </div>
+
+  <div class="container" style="margin-top:-6px">
+    <section class="card">
+      <h2>補足（実装の要点）</h2>
+      <div class="body">
+        <ul>
+          <li>Web Audio API で短時間RMS → dBFS化し、<strong>しきい値</strong>・<strong>無音長</strong>・<strong>前後パディング</strong>で保持区間を抽出。</li>
+          <li>抽出結果を <code>trim/atrim + concat</code> の <code>filter_complex</code> に変換し、ffmpeg.wasm で再エンコードします。</li>
+          <li>端末・ブラウザのメモリ制約により非常に長い動画は失敗することがあります（iPadは特に厳しめ）。</li>
+        </ul>
+      </div>
+    </section>
+  </div>
+
+  <!-- ffmpeg.wasm（UMD） -->
+  <script src="https://unpkg.com/@ffmpeg/ffmpeg@0.12.7/dist/ffmpeg.min.js"></script>
+  <script>
+    const els = {
+      file: document.getElementById('file'),
+      analyze: document.getElementById('analyzeBtn'),
+      recalc: document.getElementById('recalcBtn'),
+      cut: document.getElementById('cutBtn'),
+      wave: document.getElementById('wave'),
+      segList: document.getElementById('segList'),
+      thresh: document.getElementById('thresh'),
+      threshVal: document.getElementById('threshVal'),
+      minSil: document.getElementById('minSil'),
+      minSilVal: document.getElementById('minSilVal'),
+      pad: document.getElementById('pad'),
+      padVal: document.getElementById('padVal'),
+      win: document.getElementById('win'),
+      winVal: document.getElementById('winVal'),
+      live: document.getElementById('live'),
+      analysisMeta: document.getElementById('analysisMeta'),
+      log: document.getElementById('log'),
+      prog: document.getElementById('prog'),
+      outWrap: document.getElementById('outWrap'),
+      player: document.getElementById('player'),
+      previewToggle: document.getElementById('previewToggle'),
+      previewStart: document.getElementById('previewStart'),
+      previewStop: document.getElementById('previewStop'),
+      outNameInput: document.getElementById('outNameInput'),
+      crf: document.getElementById('crf'),
+      crfVal: document.getElementById('crfVal'),
+      preset: document.getElementById('preset'),
+      abitrate: document.getElementById('abitrate'),
+      makeProxyBtn: document.getElementById('makeProxyBtn'),
+      proxyHint: document.getElementById('proxyHint'),
+    };
+
+    let decoded = null; // {audioBuffer, duration}
+    let analysis = null; // {dbfs: Float32Array, stepSec, duration}
+    let keepSegments = []; // [{start,end}]
+    let inputFileName = null;
+    let inputBlobURL = null;
+    let previewOn = false;
+    let previewHandlersBound = false;
+
+    // UI labels
+    const syncLabels=()=>{
+      els.threshVal.textContent = `${els.thresh.value} dB`;
+      els.minSilVal.textContent = `${els.minSil.value} ms`;
+      els.padVal.textContent = `${els.pad.value} ms`;
+      els.winVal.textContent = `${els.win.value} ms`;
+      els.crfVal.textContent = `CRF ${els.crf.value}`;
+    };
+    ['thresh','minSil','pad','win','crf'].forEach(id=>els[id].addEventListener('input',()=>{syncLabels(); if(els.live.checked && decoded) debouncedRecompute(); else drawWave(analysis?.dbfs||[]);}));
+    syncLabels();
+
+    // Debounce helper
+    let recomputeTimer=null;
+    function debouncedRecompute(){ clearTimeout(recomputeTimer); recomputeTimer=setTimeout(()=>computeAnalysis(), 160); }
+
+    // File selection
+    els.file.addEventListener('change',()=>{
+      const f = els.file.files?.[0];
+      if(!f){ els.analyze.disabled = true; return; }
+      inputFileName = f.name;
+      els.analyze.disabled = false; els.recalc.disabled = true;
+      decoded = null; analysis = null; keepSegments = [];
+      drawWave([]); els.segList.textContent = '解析待ち…';
+      els.outWrap.innerHTML = '';
+      log(`選択: ${f.name} (${(f.size/1e6).toFixed(1)} MB)`);
+      if(inputBlobURL) URL.revokeObjectURL(inputBlobURL);
+      inputBlobURL = URL.createObjectURL(f);
+      els.player.src = inputBlobURL; 
+      els.player.load();
+      els.previewStart.disabled = false; els.previewStop.disabled = false; // ネイティブ再生は常に可
+      els.previewToggle.disabled = true; // スキップ再生は解析後
+      els.makeProxyBtn.style.display = 'none'; els.proxyHint.textContent = '';
+    });
+
+    // Analyze using Web Audio API
+    els.analyze.addEventListener('click', async()=>{
+      const file = els.file.files?.[0]; if(!file) return;
+      els.analyze.disabled = true; log('音声デコード中…');
+      try{
+        const ac = new (window.AudioContext || window.webkitAudioContext)();
+        const buf = await ac.decodeAudioData(await file.arrayBuffer());
+        const duration = buf.duration; decoded = {audioBuffer:buf, duration};
+        log(`Audio decoded: ${duration.toFixed(3)} sec, ch=${buf.numberOfChannels}, sr=${buf.sampleRate}`);
+        await computeAnalysis();
+        els.recalc.disabled = false; els.cut.disabled = false;
+        els.previewToggle.disabled = false; els.previewStart.disabled = false; els.previewStop.disabled = false;
+      }catch(err){ error(`デコードに失敗: ${err?.message||err}`); els.analyze.disabled = false; }
+    });
+
+    // Manual recalc
+    els.recalc.addEventListener('click', async()=>{ if(!decoded) return; await computeAnalysis(); });
+
+    // Compute RMS->dBFS and segments
+    async function computeAnalysis(){
+      const {audioBuffer, duration} = decoded; const sr = audioBuffer.sampleRate; const ch = audioBuffer.numberOfChannels;
+      const winMs = +els.win.value; const stepSamples = Math.max(1, Math.round((winMs/1000)*sr));
+      const len = Math.ceil(audioBuffer.length / stepSamples); const dbfs = new Float32Array(len);
+      const eps = 1e-12; const chData = Array.from({length:ch}, (_,i)=>audioBuffer.getChannelData(i));
+      let idx=0; for(let s=0; s<audioBuffer.length; s+=stepSamples){
+        const end = Math.min(s+stepSamples, audioBuffer.length); let sumsq=0, count=0;
+        for(let i=s;i<end;i++){ let sample=0; for(let c=0;c<ch;c++) sample += chData[c][i]||0; sample/=ch; sumsq += sample*sample; count++; }
+        const rms = Math.sqrt(sumsq/Math.max(1,count)); dbfs[idx++] = 20*Math.log10(Math.max(rms, eps));
+      }
+      analysis = {dbfs, stepSec: stepSamples/sr, duration};
+
+      const thr = +els.thresh.value; const minSil = +els.minSil.value/1000; const pad = +els.pad.value/1000;
+      keepSegments = buildKeepSegments(dbfs, analysis.stepSec, duration, thr, minSil, pad);
+      els.analysisMeta.textContent = `検出ウィンドウ: ${winMs}ms, サンプル数: ${dbfs.length}, 残す区間: ${keepSegments.length} 個`;
+      drawWave(dbfs); renderSegments();
+      if(previewOn){ const seg = withinKeep(els.player.currentTime); if(!seg && keepSegments[0]) els.player.currentTime = keepSegments[0].start; }
+    }
+
+    function buildKeepSegments(dbfs, step, duration, thr, minSil, pad){
+      const mask = dbfs.map(v=> v >= thr ? 1 : 0); const segs=[]; let runStart=null;
+      for(let i=0;i<mask.length;i++){
+        if(mask[i]===1 && runStart===null){ runStart=i; }
+        if((mask[i]===0 || i===mask.length-1) && runStart!==null){ const last = (mask[i]===0 ? i-1 : i); const st = runStart*step; const en = Math.min((last+1)*step, duration); segs.push({start:st, end:en}); runStart=null; }
+      }
+      const merged=[]; 
+      for(const s of segs){
+        const prev = merged[merged.length-1];
+        if(prev && s.start - prev.end < minSil){ prev.end = s.end; } else { merged.push({...s}); }
+      }
+      return merged.map(s=>({ start:Math.max(0,s.start-pad), end:Math.min(duration,s.end+pad) }));
+    }
+
+    // Wave + overlays
+    function drawWave(dbfs){
+      const canvas = els.wave; const dpr = window.devicePixelRatio||1; const W = canvas.clientWidth; const H = canvas.clientHeight;
+      canvas.width = Math.floor(W*dpr); canvas.height = Math.floor(H*dpr); const ctx = canvas.getContext('2d');
+      ctx.setTransform(dpr,0,0,dpr,0,0); ctx.clearRect(0,0,W,H);
+      ctx.strokeStyle = '#1f2a35'; ctx.lineWidth=1; ctx.beginPath(); for(let y=0;y<=4;y++){ const yy=(H-20)*(y/4)+10; ctx.moveTo(8,yy); ctx.lineTo(W-8,yy);} ctx.stroke();
+      const toY=v=>{ const clamped=Math.max(-90,Math.min(0,v||-90)); const t=(clamped+90)/90; return 10+(1-t)*(H-20); };
+      const tToX=t=> 10 + ((t/(analysis?.duration||1))*(W-20));
+      if(analysis && keepSegments.length){ ctx.fillStyle='rgba(108,225,166,0.18)'; keepSegments.forEach(s=>{ const x1=tToX(s.start), x2=tToX(s.end); ctx.fillRect(x1,10,Math.max(1,x2-x1),H-20); }); }
+      if(dbfs && dbfs.length){ ctx.strokeStyle='#6ce1a6'; ctx.lineWidth=1; ctx.beginPath(); for(let i=0;i<dbfs.length;i++){ const x=10 + (i/(dbfs.length-1))*(W-20); const y=toY(dbfs[i]); if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);} ctx.stroke(); }
+      const thr=+els.thresh.value; const ythr=toY(thr); ctx.strokeStyle='#4aa3ff'; ctx.setLineDash([4,4]); ctx.beginPath(); ctx.moveTo(8,ythr); ctx.lineTo(W-8,ythr); ctx.stroke(); ctx.setLineDash([]);
+    }
+
+    function renderSegments(){
+      if(!keepSegments.length){ els.segList.innerHTML = '<div>検出された保持区間はありません。しきい値を下げてください。</div>'; return; }
+      const fmt=t=> new Date(t*1000).toISOString().substring(11,23);
+      els.segList.innerHTML = keepSegments.map((s,i)=>`<div>#${i+1} <span class="mono">${fmt(s.start)}</span> → <span class="mono">${fmt(s.end)}</span> <span class="hint">(${(s.end-s.start).toFixed(2)}s)</span></div>`).join('');
+      if(els.player && els.player.paused){ const first = keepSegments[0]; if(first) els.player.currentTime = first.start; }
+    }
+
+    function log(msg){ els.log.textContent += `
+${msg}`; els.log.scrollTop=els.log.scrollHeight; }
+    function error(msg){ log(`❌ ${msg}`); }
+
+    // --- プレビュー（無音スキップ） ---
+    function withinKeep(t){ for(const seg of keepSegments){ if(t>=seg.start && t<seg.end) return seg; } return null; }
+    function nextKeepStartAfter(t){ for(const seg of keepSegments){ if(seg.end <= t) continue; if(t < seg.start) return seg.start; } return null; }
+    function bindPreviewHandlers(){ if(previewHandlersBound) return; els.player.addEventListener('timeupdate',()=>{ if(!previewOn || !keepSegments.length) return; const t=els.player.currentTime; const seg=withinKeep(t); if(!seg){ const nextStart = nextKeepStartAfter(t); if(nextStart!=null){ els.player.currentTime = nextStart; } else { els.player.pause(); } } }); previewHandlersBound=true; }
+    bindPreviewHandlers();
+    // 動画の読み込み状態に応じたハンドリング
+    els.player.addEventListener('loadedmetadata', ()=>{ log(`メタデータ取得: duration=${(els.player.duration||0).toFixed(2)}s`); });
+    els.player.addEventListener('error', ()=>{ error('動画プレビューに失敗しました。ブラウザがコーデックに未対応の可能性があります。'); detectAndOfferProxy(); });
+    els.previewToggle.addEventListener('change',()=>{ previewOn = !!els.previewToggle.checked; if(previewOn && keepSegments.length){ els.player.currentTime = keepSegments[0].start; } });
+    els.previewStart.addEventListener('click',()=>{ if(keepSegments.length && previewOn){ els.player.currentTime = keepSegments[0].start; } els.player.play(); });
+    els.previewStop.addEventListener('click',()=>{ els.player.pause(); });
+
+    // Wave seek
+    els.wave.addEventListener('click',(e)=>{ if(!analysis) return; const rect=els.wave.getBoundingClientRect(); const x=(e.clientX-rect.left)/rect.width; const t=x*analysis.duration; if(previewOn){ const seg=withinKeep(t); if(!seg){ const nxt=nextKeepStartAfter(t); if(nxt!=null) els.player.currentTime=nxt; else els.player.pause(); return; } } els.player.currentTime=t; });
+
+    // --- ffmpeg.wasm ---
+    const { createFFmpeg, fetchFile } = FFmpeg; // UMD global
+    const ffmpeg = createFFmpeg({ corePath:'https://unpkg.com/@ffmpeg/core@0.12.7/dist/ffmpeg-core.js', log:true, progress:({ratio})=>{ els.prog.style.width = `${Math.min(1,Math.max(0,ratio))*100}%`; } });
+    let ffmpegReady=false; async function ensureFFmpeg(){ if(!ffmpegReady){ log('ffmpeg.wasm 起動中（初回のみ数十MBを読み込みます）…'); await ffmpeg.load(); ffmpegReady=true; log('ffmpeg.wasm 準備完了'); } }
+
+    function detectAndOfferProxy(){
+      try{
+        const v = document.createElement('video');
+        const hev1 = v.canPlayType('video/mp4; codecs="hev1"');
+        const hvc1 = v.canPlayType('video/mp4; codecs="hvc1"');
+        // Windows Chrome などで HEVC 非対応のケースが多い
+        if(hev1==='' && hvc1===''){
+          els.makeProxyBtn.style.display = 'inline-block';
+          els.proxyHint.textContent = 'HEVC(hevc/hvc1)が再生できない場合は互換プレビューを作成してください。';
+        }
+      }catch(_e){ els.makeProxyBtn.style.display = 'inline-block'; }
+    }
+
+    // 互換プレビュー作成（H.264 低解像度）
+    els.makeProxyBtn.addEventListener('click', async()=>{
+      const file = els.file.files?.[0]; if(!file) return;
+      try{
+        await ensureFFmpeg(); els.makeProxyBtn.disabled = true; els.proxyHint.textContent = '変換中…（短い動画推奨）';
+        ffmpeg.FS('writeFile','proxy_in', await fetchFile(file));
+        await ffmpeg.run(
+          '-y','-i','proxy_in',
+          '-vf','scale=-2:720',
+          '-c:v','libx264','-preset','veryfast','-crf','28',
+          '-c:a','aac','-b:a','128k',
+          '-movflags','+faststart',
+          'proxy.mp4'
+        );
+        const data = ffmpeg.FS('readFile','proxy.mp4');
+        const blob = new Blob([data.buffer],{type:'video/mp4'});
+        const url = URL.createObjectURL(blob);
+        els.player.src = url; els.player.load();
+        els.proxyHint.textContent = '互換プレビューを使用中（H.264 低解像度）';
+      }catch(e){ error('互換プレビューの作成に失敗: '+(e?.message||e)); els.proxyHint.textContent=''; els.makeProxyBtn.disabled=false; }
+    });
+
+    // --- 書き出し ---
+    els.cut.addEventListener('click', async()=>{
+      if(!keepSegments.length){ error('保持区間がありません。しきい値を下げるか「再計算」してください。'); return; }
+      const file = els.file.files?.[0]; if(!file) return;
+      els.cut.disabled = true; els.recalc.disabled = true; els.analyze.disabled = true; els.prog.style.width='0%';
+      try{
+        await ensureFFmpeg();
+        const inName = 'input.mp4';
+        ffmpeg.FS('writeFile', inName, await fetchFile(file));
+
+        // filter_complex を生成
+        const chains=[]; const maps=[];
+        keepSegments.forEach((s,i)=>{
+          const st=s.start.toFixed(3), en=s.end.toFixed(3);
+          chains.push(`[0:v]trim=start=${st}:end=${en},setpts=PTS-STARTPTS[v${i}]`);
+          chains.push(`[0:a]atrim=start=${st}:end=${en},asetpts=PTS-STARTPTS[a${i}]`);
+          maps.push(`[v${i}][a${i}]`);
+        });
+        const filter = `${chains.join(';')};${maps.join('')}concat=n=${keepSegments.length}:v=1:a=1[v][a]`;
+        log('filter_complex
+'+filter);
+
+        // 出力ファイル名を安全化
+        let saveName = (els.outNameInput.value||'cut_output.mp4').trim();
+        if(!/\.(mp4|mov|m4v)$/i.test(saveName)) saveName += '.mp4';
+        const outName = 'out.mp4';
+
+        // H.264/AAC を試行 → 失敗時はデフォルト
+        try{
+          await ffmpeg.run(
+            '-y','-i', inName,
+            '-filter_complex', filter,
+            '-map','[v]','-map','[a]',
+            '-c:v','libx264','-preset', els.preset.value,'-crf', String(els.crf.value),
+            '-c:a','aac','-b:a', els.abitrate.value,
+            '-movflags','+faststart',
+            outName
+          );
+        }catch(_e){
+          log('libx264/aac が利用不可のためデフォルトエンコーダで再試行…');
+          await ffmpeg.run('-y','-i', inName,'-filter_complex', filter,'-map','[v]','-map','[a]', outName);
+        }
+
+        const data = ffmpeg.FS('readFile', outName);
+        const blob = new Blob([data.buffer], {type:'video/mp4'});
+        const url = URL.createObjectURL(blob);
+        const sizeMB = (blob.size/1e6).toFixed(1);
+        els.outWrap.innerHTML = `<div class="ok">✅ 書き出し完了: ${sizeMB} MB</div>
+          <video controls style="width:100%;max-height:360px;margin-top:8px;border:1px solid #1e2a34;border-radius:10px" src="${url}"></video>
+          <div style="margin-top:8px">
+            <a download="${saveName}" href="${url}"><button>ダウンロード</button></a>
+            <button class="secondary" id="resetBtn">別の動画でやり直す</button>
+          </div>`;
+        document.getElementById('resetBtn')?.addEventListener('click',()=>location.reload());
+        log('完了');
+      }catch(e){ error(e?.message||e); }
+      finally{ els.cut.disabled = false; els.recalc.disabled = false; els.analyze.disabled = false; }
+    });
+  </script>
+</body>
+</html>
