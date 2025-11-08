@@ -1,4 +1,4 @@
-name: Populate ffmpeg runtime (pkgdir resolve)
+name: Populate ffmpeg runtime (npm pack)
 on: { workflow_dispatch: {} }
 permissions: { contents: write }
 
@@ -13,37 +13,35 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Install ffmpeg packages
-        run: |
-          set -eux
-          npm init -y >/dev/null
-          npm i @ffmpeg/ffmpeg@0.12.7 @ffmpeg/core@0.12.10 --no-audit --no-fund
-
-      - name: Resolve package dirs and copy artifacts
+      - name: Fetch tarballs via npm pack and extract dist/*
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p assets/ffmpeg
 
-          # 各パッケージの「ディレクトリ」（package.json の場所）を解決
-          FFPKG_DIR=$(node -p "require('path').dirname(require.resolve('@ffmpeg/ffmpeg/package.json'))")
-          COREPKG_DIR=$(node -p "require('path').dirname(require.resolve('@ffmpeg/core/package.json'))")
+          echo "==> npm pack @ffmpeg/ffmpeg@0.12.7"
+          FF_TGZ=$(npm pack @ffmpeg/ffmpeg@0.12.7 --silent)
+          echo "  created: $FF_TGZ"
+          echo "  listing:"
+          tar -tzf "$FF_TGZ" | sed -n '1,40p'
+          # UMD を dist/ からワイルドカードで抜く（package/ でも別名でもOK）
+          tar -xOf "$FF_TGZ" */dist/ffmpeg.min.js > assets/ffmpeg/ffmpeg.min.js
+          rm -f "$FF_TGZ"
 
-          echo "FFPKG_DIR = $FFPKG_DIR"
-          echo "COREPKG_DIR = $COREPKG_DIR"
+          echo "==> npm pack @ffmpeg/core@0.12.10"
+          CORE_TGZ=$(npm pack @ffmpeg/core@0.12.10 --silent)
+          echo "  created: $CORE_TGZ"
+          echo "  listing:"
+          tar -tzf "$CORE_TGZ" | sed -n '1,40p'
+          for f in ffmpeg-core.js ffmpeg-core.wasm ffmpeg-core.worker.js; do
+            tar -xOf "$CORE_TGZ" "*/dist/$f" > "assets/ffmpeg/$f"
+          done
+          rm -f "$CORE_TGZ"
 
-          # 実ファイルをコピー（dist 配下）
-          cp "$FFPKG_DIR/dist/ffmpeg.min.js"                 assets/ffmpeg/ffmpeg.min.js
-          cp "$COREPKG_DIR/dist/ffmpeg-core.js"              assets/ffmpeg/ffmpeg-core.js
-          cp "$COREPKG_DIR/dist/ffmpeg-core.wasm"            assets/ffmpeg/ffmpeg-core.wasm
-          cp "$COREPKG_DIR/dist/ffmpeg-core.worker.js"       assets/ffmpeg/ffmpeg-core.worker.js
-
+          echo "==> result"
           ls -lh assets/ffmpeg
 
       - name: Commit files
         run: |
           git config user.name  "github-actions"
-          git config user.email "github-actions@users.noreply.github.com"
-          git add -A
-          git commit -m "Add ffmpeg runtime files (pkgdir resolve)" || echo "No changes"
-          git push
+          gi
