@@ -1,4 +1,4 @@
-name: Populate ffmpeg runtime (resolve paths)
+name: Populate ffmpeg runtime (pkgdir resolve)
 on: { workflow_dispatch: {} }
 permissions: { contents: write }
 
@@ -19,25 +19,24 @@ jobs:
           npm init -y >/dev/null
           npm i @ffmpeg/ffmpeg@0.12.7 @ffmpeg/core@0.12.10 --no-audit --no-fund
 
-      - name: Resolve actual file paths and copy
+      - name: Resolve package dirs and copy artifacts
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p assets/ffmpeg
 
-          # パスを Node で厳密に解決（環境依存の差異を吸収）
-          FFJS=$(node -p "require.resolve('@ffmpeg/ffmpeg/dist/ffmpeg.min.js')")
-          COREJS=$(node -p "require.resolve('@ffmpeg/core/dist/ffmpeg-core.js')")
-          COREWASM=$(node -p "require.resolve('@ffmpeg/core/dist/ffmpeg-core.wasm')")
-          COREWORKER=$(node -p "require.resolve('@ffmpeg/core/dist/ffmpeg-core.worker.js')")
+          # 各パッケージの「ディレクトリ」（package.json の場所）を解決
+          FFPKG_DIR=$(node -p "require('path').dirname(require.resolve('@ffmpeg/ffmpeg/package.json'))")
+          COREPKG_DIR=$(node -p "require('path').dirname(require.resolve('@ffmpeg/core/package.json'))")
 
-          echo "Resolved:"
-          printf '%s\n' "$FFJS" "$COREJS" "$COREWASM" "$COREWORKER"
+          echo "FFPKG_DIR = $FFPKG_DIR"
+          echo "COREPKG_DIR = $COREPKG_DIR"
 
-          cp "$FFJS"       assets/ffmpeg/ffmpeg.min.js
-          cp "$COREJS"     assets/ffmpeg/ffmpeg-core.js
-          cp "$COREWASM"   assets/ffmpeg/ffmpeg-core.wasm
-          cp "$COREWORKER" assets/ffmpeg/ffmpeg-core.worker.js
+          # 実ファイルをコピー（dist 配下）
+          cp "$FFPKG_DIR/dist/ffmpeg.min.js"                 assets/ffmpeg/ffmpeg.min.js
+          cp "$COREPKG_DIR/dist/ffmpeg-core.js"              assets/ffmpeg/ffmpeg-core.js
+          cp "$COREPKG_DIR/dist/ffmpeg-core.wasm"            assets/ffmpeg/ffmpeg-core.wasm
+          cp "$COREPKG_DIR/dist/ffmpeg-core.worker.js"       assets/ffmpeg/ffmpeg-core.worker.js
 
           ls -lh assets/ffmpeg
 
@@ -46,5 +45,5 @@ jobs:
           git config user.name  "github-actions"
           git config user.email "github-actions@users.noreply.github.com"
           git add -A
-          git commit -m "Add ffmpeg runtime files (resolved paths)" || echo "No changes"
+          git commit -m "Add ffmpeg runtime files (pkgdir resolve)" || echo "No changes"
           git push
