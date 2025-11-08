@@ -11,18 +11,26 @@ jobs:
       - name: Make folder
         run: mkdir -p assets/ffmpeg
 
-      - name: Download and extract runtime files
+      - name: Download and extract runtime files (wildcard-safe)
+        shell: bash
         run: |
-          # UMD
-          curl -L -o ffmpeg.tgz https://registry.npmjs.org/@ffmpeg/ffmpeg/-/ffmpeg-0.12.7.tgz
-          tar -xOf ffmpeg.tgz package/dist/ffmpeg.min.js > assets/ffmpeg/ffmpeg.min.js
-          rm -f ffmpeg.tgz
-          # CORE（0.12.7で404になる環境があるため 0.12.10 を使用）
-          curl -L -o core.tgz https://registry.npmjs.org/@ffmpeg/core/-/core-0.12.10.tgz
-          tar -xOf core.tgz package/dist/ffmpeg-core.js        > assets/ffmpeg/ffmpeg-core.js
-          tar -xOf core.tgz package/dist/ffmpeg-core.wasm      > assets/ffmpeg/ffmpeg-core.wasm
-          tar -xOf core.tgz package/dist/ffmpeg-core.worker.js > assets/ffmpeg/ffmpeg-core.worker.js
-          rm -f core.tgz
+          set -euo pipefail
+
+          echo "==> Download @ffmpeg/ffmpeg 0.12.7"
+          curl -sSL -o ffmpeg.tgz https://registry.npmjs.org/@ffmpeg/ffmpeg/-/ffmpeg-0.12.7.tgz
+          echo "Listing ffmpeg.tgz:"
+          tar -tzf ffmpeg.tgz | sed -n '1,20p'
+          # dist/ 配下をワイルドカードで抽出（package/ or それ以外でもOK）
+          tar -xOf ffmpeg.tgz */dist/ffmpeg.min.js > assets/ffmpeg/ffmpeg.min.js
+
+          echo "==> Download @ffmpeg/core 0.12.10"
+          curl -sSL -o core.tgz https://registry.npmjs.org/@ffmpeg/core/-/core-0.12.10.tgz
+          echo "Listing core.tgz:"
+          tar -tzf core.tgz | sed -n '1,20p'
+          for f in ffmpeg-core.js ffmpeg-core.wasm ffmpeg-core.worker.js; do
+            tar -xOf core.tgz "*/dist/$f" > "assets/ffmpeg/$f"
+          done
+
           ls -lh assets/ffmpeg
 
       - name: Commit files
@@ -30,5 +38,5 @@ jobs:
           git config user.name  "github-actions"
           git config user.email "github-actions@users.noreply.github.com"
           git add -A
-          git commit -m "Add ffmpeg runtime files" || echo "No changes"
+          git commit -m "Add ffmpeg runtime files (from npm tarballs)" || echo "No changes"
           git push
