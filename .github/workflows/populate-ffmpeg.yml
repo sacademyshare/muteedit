@@ -1,4 +1,4 @@
-name: Populate ffmpeg runtime (grep exact paths)
+name: Populate ffmpeg runtime (npm pack, robust grep)
 on: { workflow_dispatch: {} }
 permissions: { contents: write }
 
@@ -22,9 +22,9 @@ jobs:
           echo "==> npm pack @ffmpeg/ffmpeg@0.12.7"
           FF_TGZ=$(npm pack @ffmpeg/ffmpeg@0.12.7 --silent)
           echo "created: $FF_TGZ"
-          # 正確なパスを検索（末尾が dist/umd/ffmpeg.js）
+          tar -tzf "$FF_TGZ" | sed -n '1,120p'
+          # ffmpeg 側は umd/ffmpeg.js を採用（ファイル名は ffmpeg.min.js にリネームして配置）
           UMD_PATH=$(tar -tzf "$FF_TGZ" | grep -E '(^|/)dist/umd/ffmpeg\.js$' | head -n1)
-          echo "UMD_PATH=${UMD_PATH}"
           test -n "$UMD_PATH"
           tar -xOf "$FF_TGZ" "$UMD_PATH" > assets/ffmpeg/ffmpeg.min.js
           rm -f "$FF_TGZ"
@@ -32,18 +32,24 @@ jobs:
           echo "==> npm pack @ffmpeg/core@0.12.10"
           CORE_TGZ=$(npm pack @ffmpeg/core@0.12.10 --silent)
           echo "created: $CORE_TGZ"
-          # 3ファイルとも実在パスを検索して抽出
+          # 一覧を表示（デバッグ用）
+          tar -tzf "$CORE_TGZ" | sed -n '1,200p'
+
+          # ---- ここがポイント：末尾ファイル名で検索（フォルダ名は問わない）----
           for fname in ffmpeg-core.js ffmpeg-core.wasm ffmpeg-core.worker.js; do
-            P=$(tar -tzf "$CORE_TGZ" | grep -E "(^|/)dist/${fname}$" | head -n1)
-            echo "${fname} -> ${P}"
+            # pipefail のままだと grep 未ヒットで止まるので一時的に -o pipefail を外す
+            set +o pipefail
+            P=$(tar -tzf "$CORE_TGZ" | grep -E "(^|/)$fname\$" | head -n1)
+            set -o pipefail
+            echo "$fname => $P"
             test -n "$P"
-            tar -xOf "$CORE_TGZ" "$P" > "assets/ffmpeg/${fname}"
+            tar -xOf "$CORE_TGZ" "$P" > "assets/ffmpeg/$fname"
           done
           rm -f "$CORE_TGZ"
 
           echo "==> result"
           ls -lh assets/ffmpeg
-          # 最低限のサイズチェック（0バイト防止）
+          # 0バイト防止のサイズチェック
           test -s assets/ffmpeg/ffmpeg.min.js
           test -s assets/ffmpeg/ffmpeg-core.js
           test -s assets/ffmpeg/ffmpeg-core.worker.js
@@ -54,5 +60,5 @@ jobs:
           git config user.name  "github-actions"
           git config user.email "github-actions@users.noreply.github.com"
           git add -A
-          git commit -m "Add ffmpeg runtime files (exact paths)" || echo "No changes"
+          git commit -m "Add ffmpeg runtime files (robust grep)" || echo "No changes"
           git push
