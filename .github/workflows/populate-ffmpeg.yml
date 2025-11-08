@@ -1,4 +1,4 @@
-name: Populate ffmpeg runtime (npm pack, umd path)
+name: Populate ffmpeg runtime (grep exact paths)
 on: { workflow_dispatch: {} }
 permissions: { contents: write }
 
@@ -13,7 +13,7 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Fetch tarballs via npm pack and extract dist/*
+      - name: Fetch tarballs via npm pack and extract exact files
         shell: bash
         run: |
           set -euo pipefail
@@ -21,30 +21,38 @@ jobs:
 
           echo "==> npm pack @ffmpeg/ffmpeg@0.12.7"
           FF_TGZ=$(npm pack @ffmpeg/ffmpeg@0.12.7 --silent)
-          echo "  created: $FF_TGZ"
-          echo "  listing (head):"
-          tar -tzf "$FF_TGZ" | sed -n '1,80p'
-          # ★ ここがポイント：dist/umd/ffmpeg.js を取り出し、期待名 ffmpeg.min.js として配置
-          tar -xOf "$FF_TGZ" */dist/umd/ffmpeg.js > assets/ffmpeg/ffmpeg.min.js
+          echo "created: $FF_TGZ"
+          # 正確なパスを検索（末尾が dist/umd/ffmpeg.js）
+          UMD_PATH=$(tar -tzf "$FF_TGZ" | grep -E '(^|/)dist/umd/ffmpeg\.js$' | head -n1)
+          echo "UMD_PATH=${UMD_PATH}"
+          test -n "$UMD_PATH"
+          tar -xOf "$FF_TGZ" "$UMD_PATH" > assets/ffmpeg/ffmpeg.min.js
           rm -f "$FF_TGZ"
 
           echo "==> npm pack @ffmpeg/core@0.12.10"
           CORE_TGZ=$(npm pack @ffmpeg/core@0.12.10 --silent)
-          echo "  created: $CORE_TGZ"
-          echo "  listing (head):"
-          tar -tzf "$CORE_TGZ" | sed -n '1,80p'
-          for f in ffmpeg-core.js ffmpeg-core.wasm ffmpeg-core.worker.js; do
-            tar -xOf "$CORE_TGZ" "*/dist/$f" > "assets/ffmpeg/$f"
+          echo "created: $CORE_TGZ"
+          # 3ファイルとも実在パスを検索して抽出
+          for fname in ffmpeg-core.js ffmpeg-core.wasm ffmpeg-core.worker.js; do
+            P=$(tar -tzf "$CORE_TGZ" | grep -E "(^|/)dist/${fname}$" | head -n1)
+            echo "${fname} -> ${P}"
+            test -n "$P"
+            tar -xOf "$CORE_TGZ" "$P" > "assets/ffmpeg/${fname}"
           done
           rm -f "$CORE_TGZ"
 
           echo "==> result"
           ls -lh assets/ffmpeg
+          # 最低限のサイズチェック（0バイト防止）
+          test -s assets/ffmpeg/ffmpeg.min.js
+          test -s assets/ffmpeg/ffmpeg-core.js
+          test -s assets/ffmpeg/ffmpeg-core.worker.js
+          test -s assets/ffmpeg/ffmpeg-core.wasm
 
       - name: Commit files
         run: |
           git config user.name  "github-actions"
           git config user.email "github-actions@users.noreply.github.com"
           git add -A
-          git commit -m "Add ffmpeg runtime files (umd/ffmpeg.js -> ffmpeg.min.js)" || echo "No changes"
+          git commit -m "Add ffmpeg runtime files (exact paths)" || echo "No changes"
           git push
