@@ -1,4 +1,4 @@
-name: Populate ffmpeg runtime (npm pack)
+name: Populate ffmpeg runtime (npm pack, umd path)
 on: { workflow_dispatch: {} }
 permissions: { contents: write }
 
@@ -22,17 +22,17 @@ jobs:
           echo "==> npm pack @ffmpeg/ffmpeg@0.12.7"
           FF_TGZ=$(npm pack @ffmpeg/ffmpeg@0.12.7 --silent)
           echo "  created: $FF_TGZ"
-          echo "  listing:"
-          tar -tzf "$FF_TGZ" | sed -n '1,40p'
-          # UMD を dist/ からワイルドカードで抜く（package/ でも別名でもOK）
-          tar -xOf "$FF_TGZ" */dist/ffmpeg.min.js > assets/ffmpeg/ffmpeg.min.js
+          echo "  listing (head):"
+          tar -tzf "$FF_TGZ" | sed -n '1,80p'
+          # ★ ここがポイント：dist/umd/ffmpeg.js を取り出し、期待名 ffmpeg.min.js として配置
+          tar -xOf "$FF_TGZ" */dist/umd/ffmpeg.js > assets/ffmpeg/ffmpeg.min.js
           rm -f "$FF_TGZ"
 
           echo "==> npm pack @ffmpeg/core@0.12.10"
           CORE_TGZ=$(npm pack @ffmpeg/core@0.12.10 --silent)
           echo "  created: $CORE_TGZ"
-          echo "  listing:"
-          tar -tzf "$CORE_TGZ" | sed -n '1,40p'
+          echo "  listing (head):"
+          tar -tzf "$CORE_TGZ" | sed -n '1,80p'
           for f in ffmpeg-core.js ffmpeg-core.wasm ffmpeg-core.worker.js; do
             tar -xOf "$CORE_TGZ" "*/dist/$f" > "assets/ffmpeg/$f"
           done
@@ -44,4 +44,7 @@ jobs:
       - name: Commit files
         run: |
           git config user.name  "github-actions"
-          gi
+          git config user.email "github-actions@users.noreply.github.com"
+          git add -A
+          git commit -m "Add ffmpeg runtime files (umd/ffmpeg.js -> ffmpeg.min.js)" || echo "No changes"
+          git push
