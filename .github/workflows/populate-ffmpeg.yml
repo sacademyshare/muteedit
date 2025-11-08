@@ -1,4 +1,4 @@
-name: Populate ffmpeg runtime
+name: Populate ffmpeg runtime (via npm)
 on: { workflow_dispatch: {} }
 permissions: { contents: write }
 
@@ -8,29 +8,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Make folder
-        run: mkdir -p assets/ffmpeg
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
 
-      - name: Download and extract runtime files (wildcard-safe)
-        shell: bash
+      - name: Install ffmpeg packages
         run: |
-          set -euo pipefail
+          set -eux
+          npm init -y >/dev/null
+          # @ffmpeg/ffmpeg は UMD、@ffmpeg/core は wasm 本体
+          npm i @ffmpeg/ffmpeg@0.12.7 @ffmpeg/core@0.12.10 --no-audit --no-fund
 
-          echo "==> Download @ffmpeg/ffmpeg 0.12.7"
-          curl -sSL -o ffmpeg.tgz https://registry.npmjs.org/@ffmpeg/ffmpeg/-/ffmpeg-0.12.7.tgz
-          echo "Listing ffmpeg.tgz:"
-          tar -tzf ffmpeg.tgz | sed -n '1,20p'
-          # dist/ 配下をワイルドカードで抽出（package/ or それ以外でもOK）
-          tar -xOf ffmpeg.tgz */dist/ffmpeg.min.js > assets/ffmpeg/ffmpeg.min.js
-
-          echo "==> Download @ffmpeg/core 0.12.10"
-          curl -sSL -o core.tgz https://registry.npmjs.org/@ffmpeg/core/-/core-0.12.10.tgz
-          echo "Listing core.tgz:"
-          tar -tzf core.tgz | sed -n '1,20p'
-          for f in ffmpeg-core.js ffmpeg-core.wasm ffmpeg-core.worker.js; do
-            tar -xOf core.tgz "*/dist/$f" > "assets/ffmpeg/$f"
-          done
-
+      - name: Copy runtime files to assets/ffmpeg
+        run: |
+          set -eux
+          mkdir -p assets/ffmpeg
+          cp node_modules/@ffmpeg/ffmpeg/dist/ffmpeg.min.js assets/ffmpeg/
+          cp node_modules/@ffmpeg/core/dist/ffmpeg-core.js assets/ffmpeg/
+          cp node_modules/@ffmpeg/core/dist/ffmpeg-core.wasm assets/ffmpeg/
+          cp node_modules/@ffmpeg/core/dist/ffmpeg-core.worker.js assets/ffmpeg/
           ls -lh assets/ffmpeg
 
       - name: Commit files
@@ -38,5 +35,5 @@ jobs:
           git config user.name  "github-actions"
           git config user.email "github-actions@users.noreply.github.com"
           git add -A
-          git commit -m "Add ffmpeg runtime files (from npm tarballs)" || echo "No changes"
+          git commit -m "Add ffmpeg runtime files (npm -> assets/ffmpeg)" || echo "No changes"
           git push
