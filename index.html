@@ -645,6 +645,130 @@
     finally{ ensureCutState(); els.recalc.disabled=false; els.analyze.disabled=false; }
   });
 </script>
+<script>
+  // ===== 書き出し =====
+  els.cut.addEventListener('click', async()=>{
+    log('書き出し開始…');
+    if(!Array.isArray(keepSegments) || keepSegments.length===0){
+      error('保持区間がありません。しきい値↓ / 最小無音長↓ で再計算してください。');
+      els.segList.scrollIntoView({behavior:'smooth'});
+      ensureCutState();
+      return;
+    }
+    const file=els.file.files?.[0];
+    if(!file){
+      error('入力ファイルがありません。動画を選択→解析してください。');
+      ensureCutState();
+      return;
+    }
+
+    els.cut.disabled=true; els.recalc.disabled=true; els.analyze.disabled=true; els.prog.style.width='0%';
+    try{
+      await ensureFFmpeg();
+      const { fetchFile } = FFmpeg;
+      ffmpeg.FS('writeFile','input.mp4', await fetchFile(file));
+
+      const chains=[]; const maps=[];
+      keepSegments.forEach((s,i)=>{
+        const st=s.start.toFixed(3), en=s.end.toFixed(3);
+        chains.push(`[0:v]trim=start=${st}:end=${en},setpts=PTS-STARTPTS[v${i}]`);
+        chains.push(`[0:a]atrim=start=${st}:end=${en},asetpts=PTS-STARTPTS[a${i}]`);
+        maps.push(`[v${i}][a${i}]`);
+      });
+      const filter = `${chains.join(';')};${maps.join('')}concat=n=${keepSegments.length}:v=1:a=1[v][a]`;
+      log(`filter_complex\n${filter}`);
+
+      const outName='out.mp4';
+      let saveName=(els.outNameInput.value||'cut_output.mp4').trim();
+      if(!/\.(mp4|mov|m4v)$/i.test(saveName)) saveName+='.mp4';
+
+      try{
+        await ffmpeg.run(
+          '-y','-i','input.mp4',
+          '-filter_complex',filter,'-map','[v]','-map','[a]',
+          '-c:v','libx264','-preset',els.preset.value,'-crf',String(els.crf.value),
+          '-c:a','aac','-b:a',els.abitrate.value,
+          '-movflags','+faststart',
+          outName
+        );
+      }catch(_){
+        log('一次失敗 → 映像のみで再試行');
+        const filterV =
+          keepSegments.map((s,i)=>`[0:v]trim=start=${s.start.toFixed(3)}:end=${s.end.toFixed(3)},setpts=PTS-STARTPTS[v${i}]`).join(';')
+          + `;${keepSegments.map((_,i)=>`[v${i}]`).join('')}concat=n=${keepSegments.length}:v=1:a=0[v]`;
+        await ffmpeg.run(
+          '-y','-i','input.mp4',
+          '-filter_complex',filterV,'-map','[v]',
+          '-c:v','libx264','-preset',els.preset.value,'-crf',String(els.crf.value),
+          '-movflags','+faststart',
+          outName
+        );
+      }
+
+      const data = ffmpeg.FS('readFile', outName);
+      const blob = new Blob([data.buffer], { type:'video/mp4' });
+
+      // --- ここから保存ダイアログ（対応ブラウザはネイティブ、他は自動DL） ---
+      try {
+        if ('showSaveFilePicker' in window) {
+          // ネイティブの保存ダイアログ（Chrome/Edge/一部のSafari）
+          const handle = await window.showSaveFilePicker({
+            suggestedName: saveName,
+            types: [{ description: 'MP4 Video', accept: { 'video/mp4': ['.mp4', '.m4v'] } }]
+          });
+          const stream = await handle.createWritable();
+          await stream.write(blob);
+          await stream.close();
+          log(`ローカルに保存しました: ${handle.name}`);
+        } else {
+          // フォールバック：自動ダウンロード（アンカーを自動クリック）
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = saveName;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          // プレビューも表示しておく（任意）
+          const sizeMB=(blob.size/1e6).toFixed(1);
+          els.outWrap.innerHTML = `
+            <div class="ok">✅ 書き出し完了: ${sizeMB} MB</div>
+            <video controls style="width:100%;max-height:360px;margin-top:8px;border:1px solid #1e2a34;border-radius:10px" src="${url}"></video>
+            <div style="margin-top:8px">
+              <a download="${saveName}" href="${url}"><button>もう一度ダウンロード</button></a>
+              <button class="secondary" id="resetBtn">別の動画でやり直す</button>
+            </div>`;
+          document.getElementById('resetBtn')?.addEventListener('click',()=>location.reload());
+          // あとでURL解放
+          setTimeout(()=>URL.revokeObjectURL(url), 60_000);
+        }
+      } catch (saveErr) {
+        // 保存ダイアログがユーザーキャンセル等で失敗した場合もプレビュー&手動DLは用意
+        const url = URL.createObjectURL(blob);
+        const sizeMB=(blob.size/1e6).toFixed(1);
+        error('保存がキャンセル/失敗したため、手動ダウンロードを用意しました。');
+        els.outWrap.innerHTML = `
+          <div class="ok">✅ 書き出し完了: ${sizeMB} MB</div>
+          <video controls style="width:100%;max-height:360px;margin-top:8px;border:1px solid #1e2a34;border-radius:10px" src="${url}"></video>
+          <div style="margin-top:8px">
+            <a download="${saveName}" href="${url}"><button>ダウンロード</button></a>
+            <button class="secondary" id="resetBtn">別の動画でやり直す</button>
+          </div>`;
+        document.getElementById('resetBtn')?.addEventListener('click',()=>location.reload());
+        setTimeout(()=>URL.revokeObjectURL(url), 60_000);
+      }
+      // --- 保存処理ここまで ---
+
+      log('完了');
+    }catch(e){
+      error(e?.message||e);
+    }finally{
+      ensureCutState();
+      els.recalc.disabled=false;
+      els.analyze.disabled=false;
+    }
+  });
+</script>
 
 </body>
 </html>
