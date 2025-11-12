@@ -186,492 +186,478 @@
     </section>
   </div>
 
-  <!-- ★ ffmpeg UMDローダ（Pages向け）：base正規化・既定値・FFmpegWASM→FFmpeg shim -->
-  <script>
-    function sanitizeBase(b){ if(!b) return b; b=b.replace(/^\?ffbase=/,'').replace(/^\?/,''); return b.endsWith('/')?b:b+'/'; }
-    function getFFBaseOverride(){ const u=new URL(location.href); const p=u.searchParams.get('ffbase'); if(p){const v=sanitizeBase(p); localStorage.setItem('ffbase',v); return v;} const s=localStorage.getItem('ffbase'); return s?sanitizeBase(s):null; }
-    const hereDir = location.pathname.replace(/[^/]+$/,'');
-    if(location.hostname.endsWith('.github.io') && !window.__FFBASE_DEFAULT__){ const repo='/'+location.pathname.split('/')[1]+'/'; window.__FFBASE_DEFAULT__=repo+'assets/ffmpeg/'; }
-    function absolutePagesBase(){ const repo='/'+location.pathname.split('/')[1]+'/'; return repo+'assets/ffmpeg/'; }
-    function buildCandidates(){
-      const set=new Set();
-      if(location.hostname.endsWith('.github.io')) set.add(absolutePagesBase());
-      const ov=getFFBaseOverride(); if(ov) set.add(ov);
-      if(window.__FFBASE_DEFAULT__) set.add(window.__FFBASE_DEFAULT__);
-      ['./assets/ffmpeg/','./ffmpeg/', hereDir+'assets/ffmpeg/', hereDir+'ffmpeg/','../assets/ffmpeg/','../../assets/ffmpeg/'].forEach(b=>set.add(b.endsWith('/')?b:b+'/'));
-      return Array.from(set);
-    }
-    function loadScript(src,timeoutMs=8000){
-      return new Promise((resolve,reject)=>{
-        const s=document.createElement('script'); s.src=src; s.async=true;
-        let done=false; const tid=setTimeout(()=>{ if(done) return; done=true; s.remove(); reject(new Error('Timeout: '+src)); },timeoutMs);
-        s.onload=()=>{ if(done) return; done=true; clearTimeout(tid); resolve(); };
-        s.onerror=()=>{ if(done) return; done=true; clearTimeout(tid); reject(new Error('Failed: '+src)); };
-        document.head.appendChild(s);
-      });
-    }
-    function ensureFFmpegShim(ffbase){
-      if(window.FFmpeg && typeof window.FFmpeg.createFFmpeg==='function') return;
-      if(!window.FFmpegWASM || !window.FFmpegWASM.FFmpeg) return;
-      if(ffbase && !ffbase.endsWith('/')) ffbase+='/';
-      function createFFmpeg(opts){
-        const core=new window.FFmpegWASM.FFmpeg();
-        let logger=null, progress=null;
-        core.on('log',m=>{ if(logger) logger({type:'info', message:String(m && m.message!==undefined? m.message : m)}); });
-        core.on('progress',p=>{ const r=(p&&typeof p.ratio==='number')?p.ratio:0; if(progress) progress({ratio:r}); });
-        return {
-          load: ()=>core.load({ coreURL:(opts&&(opts.corePath||opts.coreURL))||(ffbase+'ffmpeg-core.js'), wasmURL:(opts&&opts.wasmPath)||(ffbase+'ffmpeg-core.wasm'), workerURL:(opts&&opts.workerPath)||(ffbase+'ffmpeg-core.worker.js') }),
-          run: (...argv)=>core.exec(argv),
-          FS: (op,...rest)=>{ switch(op){case'writeFile':return core.writeFile(rest[0],rest[1]); case'readFile':return core.readFile(rest[0],'binary'); case'unlink':return core.deleteFile(rest[0]); case'readdir':return core.listDir(rest[0]); case'mkdir':return core.createDir(rest[0]); case'rmdir':return core.deleteDir(rest[0]); default: throw new Error('Unsupported FS op'); } },
-          setLogger:(fn)=>{logger=fn;}, setProgress:(fn)=>{progress=fn;}, terminate:()=>{ try{core.terminate();}catch(_){} }
-        };
-      }
-      async function fetchFile(input){
-        if(input instanceof Uint8Array) return input;
-        if(typeof Blob!=='undefined' && input instanceof Blob) return new Uint8Array(await input.arrayBuffer());
-        if(typeof input==='string'){ const res=await fetch(input); return new Uint8Array(await res.arrayBuffer()); }
-        if(input && typeof input.arrayBuffer==='function') return new Uint8Array(await input.arrayBuffer());
-        throw new Error('Unsupported input for fetchFile');
-      }
-      window.FFmpeg={createFFmpeg, fetchFile};
-    }
-    async function tryLoadLocalUMD(bases){
-      const tried=[];
-      for(const base of bases){
-        const url=base+'ffmpeg.min.js'; tried.push(url);
-        try{ await loadScript(url,8000); ensureFFmpegShim(base);
-          if(!(window.FFmpeg && window.FFmpeg.createFFmpeg && window.FFmpeg.fetchFile)) throw new Error('FFmpeg global missing after load');
-          window.__FFBASE_SELECTED__=base; return base;
-        }catch(e){ console.warn('[UMD/local] failed:',e.message); }
-      }
-      const logEl=document.getElementById('log');
-      if(logEl){ logEl.textContent+='\n❌ ffmpeg.min.js 探索失敗。試行URL:\n- '+tried.join('\n- '); logEl.scrollTop=logEl.scrollHeight; }
-      throw new Error('同一オリジンの ffmpeg.min.js を読めませんでした（配置パス/ファイル名/MIMEを確認）');
-    }
-    async function loadFFmpegLocalWithPrompt(){
-      try{ return await tryLoadLocalUMD(buildCandidates()); }
-      catch(e){
-        const hint='ffmpeg.min.js のあるフォルダURLを入力（例: ./assets/ffmpeg/ や /<repo>/assets/ffmpeg/ など）。\n次回以降は localStorage の ffbase に保存されます。';
-        const manual=prompt(hint, localStorage.getItem('ffbase')||(window.__FFBASE_DEFAULT__||'./assets/ffmpeg/'));
-        if(manual){ const base=sanitizeBase(manual); localStorage.setItem('ffbase',base); return await tryLoadLocalUMD([base]); }
-        throw e;
-      }
-    }
-    async function urlOk(u){ try{ const r=await fetch(u,{method:'HEAD',cache:'no-store'}); return r.ok; }catch{ return false; } }
-    async function pickWorkingFFBase(bases){ const names=['ffmpeg-core.js','ffmpeg-core.mjs']; for(const b of bases){ for(const n of names){ if(await urlOk(b+n)) return {base:b, core:n}; } } throw new Error('ffmpeg-core(.js|.mjs) が見つかりませんでした。'); }
-  </script>
-
-  <!-- ★ アプリ本体 -->
-  <script>
-    if(window.__MUTEEDIT_INITED__){
-      console.warn('[muteedit] script already initialized; skipping re-init');
-    }else{
-      window.__MUTEEDIT_INITED__=true;
-
-      const els = {
-        file: document.getElementById('file'),
-        analyze: document.getElementById('analyzeBtn'),
-        recalc: document.getElementById('recalcBtn'),
-        cut: document.getElementById('cutBtn'),
-        wave: document.getElementById('wave'),
-        segList: document.getElementById('segList'),
-        thresh: document.getElementById('thresh'),
-        threshVal: document.getElementById('threshVal'),
-        minSil: document.getElementById('minSil'),
-        minSilVal: document.getElementById('minSilVal'),
-        pad: document.getElementById('pad'),
-        padVal: document.getElementById('padVal'),
-        win: document.getElementById('win'),
-        winVal: document.getElementById('winVal'),
-        live: document.getElementById('live'),
-        analysisMeta: document.getElementById('analysisMeta'),
-        log: document.getElementById('log'),
-        prog: document.getElementById('prog'),
-        outWrap: document.getElementById('outWrap'),
-        player: document.getElementById('player'),
-        previewToggle: document.getElementById('previewToggle'),
-        previewStart: document.getElementById('previewStart'),
-        previewStop: document.getElementById('previewStop'),
-        outNameInput: document.getElementById('outNameInput'),
-        crf: document.getElementById('crf'),
-        crfVal: document.getElementById('crfVal'),
-        preset: document.getElementById('preset'),
-        abitrate: document.getElementById('abitrate'),
-        exportMode: document.getElementById('exportMode'),
-        diagBtn: document.getElementById('diagBtn'),
-      };
-      function log(msg){ els.log.textContent+=`\n${msg}`; els.log.scrollTop=els.log.scrollHeight; }
-      function error(msg){ log(`❌ ${msg}`); }
-
-      // 二重ハンドラ排除（キャッシュ/再挿入対策）
-      function resetDomEventTarget(el){ const fresh=el.cloneNode(true); el.parentNode.replaceChild(fresh,el); return fresh; }
-      els.cut = resetDomEventTarget(els.cut);
-      els.previewStart = resetDomEventTarget(els.previewStart);
-      els.previewStop  = resetDomEventTarget(els.previewStop);
-
-      let decoded=null, analysis=null, keepSegments=[], inputBlobURL=null;
-      let previewOn=false, previewHandlersBound=false;
-
-      // ffmpeg
-      let ffmpeg=null, ffmpegReady=false, FF_BASE=null, FF_CORE_FILE='ffmpeg-core.js';
-
-      function ensureCutState(){ els.cut.disabled = !(decoded && analysis); }
-      let recomputeTimer=null; function debouncedRecompute(){ clearTimeout(recomputeTimer); recomputeTimer=setTimeout(()=>computeAnalysis(),160); }
-
-      async function ensureFFmpeg(){
-        if(ffmpegReady) return;
-        let umdBase;
-        try{ umdBase=await loadFFmpegLocalWithPrompt(); }
-        catch(e){ error(e.message + '\nヒント: URL末尾に ?ffbase=/'+location.pathname.split('/')[1]+'/assets/ffmpeg/ を付けて再読み込み'); throw e; }
-
-        const headCandidates=[]; if(location.hostname.endsWith('.github.io')) headCandidates.push(absolutePagesBase());
-        headCandidates.push(umdBase, ...buildCandidates());
-        try{ const picked=await pickWorkingFFBase(headCandidates); FF_BASE=picked.base; FF_CORE_FILE=picked.core; }
-        catch(e){ localStorage.removeItem('ffbase'); const picked=await pickWorkingFFBase(buildCandidates()); FF_BASE=picked.base; FF_CORE_FILE=picked.core; }
-
-        if(!(window.FFmpeg && FFmpeg.createFFmpeg && FFmpeg.fetchFile)) throw new Error('FFmpeg グローバルが見つかりません');
-
-        const { createFFmpeg } = FFmpeg;
-        ffmpeg=createFFmpeg({
-          corePath: FF_BASE+FF_CORE_FILE,
-          workerPath: FF_BASE+'ffmpeg-core.worker.js',
-          log:true,
-          logger:({type,message})=>{ els.log.textContent+=`\n[ffmpeg:${type}] ${message}`; els.log.scrollTop=els.log.scrollHeight; },
-          progress:({ratio})=>{ const r=Number.isFinite(ratio)?Math.min(1,Math.max(0,ratio)):0; els.prog.style.width=`${r*100}%`; }
-        });
-        log(`ffmpeg.wasm 起動中（base=${FF_BASE} core=${FF_CORE_FILE}）…`);
-        await ffmpeg.load(); ffmpegReady=true; log('ffmpeg.wasm 準備完了');
-      }
-
-      const syncLabels=()=>{ els.threshVal.textContent=`${els.thresh.value} dB`; els.minSilVal.textContent=`${els.minSil.value} ms`; els.padVal.textContent=`${els.pad.value} ms`; els.winVal.textContent=`${els.win.value} ms`; els.crfVal.textContent=`CRF ${els.crf.value}`; };
-      ['thresh','minSil','pad','win','crf'].forEach(id=>els[id].addEventListener('input',()=>{ syncLabels(); if(els.live.checked && decoded) debouncedRecompute(); else drawWave(analysis?.dbfs||[]); }));
-      syncLabels();
-
-      els.file.addEventListener('change',()=>{
-        const f=els.file.files?.[0];
-        if(!f){ els.analyze.disabled=true; ensureCutState(); return; }
-        els.analyze.disabled=false; els.recalc.disabled=true;
-        decoded=null; analysis=null; keepSegments=[];
-        drawWave([]); els.segList.textContent='解析待ち…'; els.outWrap.innerHTML='';
-        ensureCutState(); log(`選択: ${f.name} (${(f.size/1e6).toFixed(1)} MB)`);
-        if(inputBlobURL) URL.revokeObjectURL(inputBlobURL);
-        inputBlobURL=URL.createObjectURL(f);
-        els.player.src=inputBlobURL; els.player.load();
-        els.previewStart.disabled=false; els.previewStop.disabled=false; els.previewToggle.disabled=true;
-      });
-
-      els.analyze.addEventListener('click', async()=>{
-        const file=els.file.files?.[0]; if(!file) return;
-        els.analyze.disabled=true; log('音声デコード中…');
-        try{
-          const ac=new (window.AudioContext||window.webkitAudioContext)();
-          const buf=await ac.decodeAudioData(await file.arrayBuffer());
-          decoded={audioBuffer:buf, duration:buf.duration};
-          log(`Audio decoded: ${buf.duration.toFixed(3)} sec, ch=${buf.numberOfChannels}, sr=${buf.sampleRate}`);
-          await computeAnalysis();
-          els.recalc.disabled=false; els.previewToggle.disabled=false; els.previewStart.disabled=false; els.previewStop.disabled=false;
-        }catch(err){ error(`デコードに失敗: ${err?.message||err}`); els.analyze.disabled=false; }
-        finally{ ensureCutState(); }
-      });
-
-      els.recalc.addEventListener('click', async()=>{ if(!decoded) return; await computeAnalysis(); });
-
-      async function computeAnalysis(){
-        if(!decoded){ ensureCutState(); return; }
-        try{
-          const {audioBuffer, duration}=decoded; const sr=audioBuffer.sampleRate; const ch=audioBuffer.numberOfChannels;
-          const winMs=+els.win.value; const stepSamples=Math.max(1,Math.round((winMs/1000)*sr));
-          const len=Math.ceil(audioBuffer.length/stepSamples); const dbfs=new Float32Array(len);
-          const eps=1e-12; const chData=Array.from({length:ch},(_,i)=>audioBuffer.getChannelData(i));
-          let idx=0; for(let s=0;s<audioBuffer.length;s+=stepSamples){
-            const end=Math.min(s+stepSamples,audioBuffer.length); let sumsq=0,count=0;
-            for(let i=s;i<end;i++){ let sample=0; for(let c=0;c<ch;c++) sample+=chData[c][i]||0; sample/=ch; sumsq+=sample*sample; count++; }
-            const rms=Math.sqrt(sumsq/Math.max(1,count)); dbfs[idx++]=20*Math.log10(Math.max(rms,eps));
-          }
-          analysis={dbfs, stepSec:stepSamples/sr, duration};
-
-          const thr=+els.thresh.value; const minSil=+els.minSil.value/1000; const pad=+els.pad.value/1000;
-          keepSegments=buildKeepSegments(dbfs,analysis.stepSec,duration,thr,minSil,pad);
-          els.analysisMeta.textContent=`検出ウィンドウ: ${winMs}ms, サンプル数: ${dbfs.length}, 残す区間: ${keepSegments.length} 個`;
-          drawWave(dbfs); renderSegments();
-
-          ensureCutState();
-          if(keepSegments.length>0) els.cut.disabled=false;
-
-          if(previewOn){ const seg=withinKeep(els.player.currentTime); if(!seg && keepSegments[0]) els.player.currentTime=keepSegments[0].start; }
-        }catch(e){ error(`解析エラー: ${e?.message||e}`); }
-        finally{ ensureCutState(); }
-      }
-
-      function buildKeepSegments(dbfs, step, duration, thr, minSil, pad){
-        const mask=dbfs.map(v=>v>=thr?1:0); const segs=[]; let runStart=null;
-        for(let i=0;i<mask.length;i++){
-          if(mask[i]===1 && runStart===null) runStart=i;
-          if((mask[i]===0 || i===mask.length-1) && runStart!==null){
-            const last=(mask[i]===0?i-1:i); const st=runStart*step; const en=Math.min((last+1)*step,duration);
-            segs.push({start:st,end:en}); runStart=null;
-          }
-        }
-        const merged=[]; for(const s of segs){ const prev=merged[merged.length-1];
-          if(prev && s.start-prev.end<minSil) prev.end=s.end; else merged.push({...s}); }
-        return merged.map(s=>({start:Math.max(0,s.start-pad), end:Math.min(duration,s.end+pad)}));
-      }
-
-      function drawWave(dbfs){
-        const canvas=els.wave; const dpr=window.devicePixelRatio||1; const W=canvas.clientWidth; const H=canvas.clientHeight;
-        canvas.width=Math.floor(W*dpr); canvas.height=Math.floor(H*dpr); const ctx=canvas.getContext('2d');
-        ctx.setTransform(dpr,0,0,dpr,0,0); ctx.clearRect(0,0,W,H);
-        ctx.strokeStyle='#1f2a35'; ctx.lineWidth=1; ctx.beginPath(); for(let y=0;y<=4;y++){ const yy=(H-20)*(y/4)+10; ctx.moveTo(8,yy); ctx.lineTo(W-8,yy);} ctx.stroke();
-        const toY=v=>{ const clamped=Math.max(-90,Math.min(0,v||-90)); const t=(clamped+90)/90; return 10+(1-t)*(H-20); };
-        const tToX=t=>10+((t/(analysis?.duration||1))*(W-20));
-        if(analysis && keepSegments.length){ ctx.fillStyle='rgba(108,225,166,0.18)'; keepSegments.forEach(s=>{ const x1=tToX(s.start),x2=tToX(s.end); ctx.fillRect(x1,10,Math.max(1,x2-x1),H-20); }); }
-        if(dbfs && dbfs.length){ ctx.strokeStyle='#6ce1a6'; ctx.lineWidth=1; ctx.beginPath(); for(let i=0;i<dbfs.length;i++){ const x=10+(i/(dbfs.length-1))*(W-20); const y=toY(dbfs[i]); if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);} ctx.stroke(); }
-        const thr=+els.thresh.value; const ythr=toY(thr); ctx.strokeStyle='#4aa3ff'; ctx.setLineDash([4,4]); ctx.beginPath(); ctx.moveTo(8,ythr); ctx.lineTo(W-8,ythr); ctx.stroke(); ctx.setLineDash([]);
-      }
-
-      function renderSegments(){
-        if(!keepSegments.length){ els.segList.innerHTML='<div>検出された保持区間はありません。しきい値を下げてください。</div>'; return; }
-        const fmt=t=> new Date(t*1000).toISOString().substring(11,23);
-        els.segList.innerHTML=keepSegments.map((s,i)=>`<div>#${i+1} <span class="mono">${fmt(s.start)}</span> → <span class="mono">${fmt(s.end)}</span> <span class="hint">(${(s.end-s.start).toFixed(2)}s)</span></div>`).join('');
-      }
-
-      function withinKeep(t){ for(const seg of keepSegments){ if(t>=seg.start && t<seg.end) return seg; } return null; }
-      function nextKeepStartAfter(t){ for(const seg of keepSegments){ if(seg.end<=t) continue; if(t<seg.start) return seg.start; } return null; }
-      function bindPreviewHandlers(){
-        if(previewHandlersBound) return;
-        els.player.addEventListener('timeupdate',()=>{ if(!previewOn || !keepSegments.length) return;
-          const t=els.player.currentTime; const seg=withinKeep(t);
-          if(!seg){ const nextStart=nextKeepStartAfter(t); if(nextStart!=null) els.player.currentTime=nextStart; else els.player.pause(); }
-        });
-        previewHandlersBound=true;
-      }
-      bindPreviewHandlers();
-      els.player.addEventListener('loadedmetadata', ()=>{ log(`メタデータ取得: duration=${(els.player.duration||0).toFixed(2)}s`); });
-      els.previewToggle.addEventListener('change',()=>{ previewOn=!!els.previewToggle.checked; if(previewOn && keepSegments.length){ els.player.currentTime=keepSegments[0].start; } });
-      els.previewStart.addEventListener('click',()=>{ if(keepSegments.length && previewOn){ els.player.currentTime=keepSegments[0].start; } els.player.play(); });
-      els.previewStop.addEventListener('click',()=>{ els.player.pause(); });
-
-      els.wave.addEventListener('click',(e)=>{ if(!analysis) return;
-        const rect=els.wave.getBoundingClientRect(); const x=(e.clientX-rect.left)/rect.width; const t=x*analysis.duration;
-        if(previewOn){ const seg=withinKeep(t); if(!seg){ const nxt=nextKeepStartAfter(t); if(nxt!=null) els.player.currentTime=nxt; else els.player.pause(); return; } }
-        els.player.currentTime=t;
-      });
-
-      els.diagBtn.addEventListener('click', async()=>{
-        log('[診断] 開始');
-        try{
-          const canPlayMP4=!!document.createElement('video').canPlayType('video/mp4'); log(`[診断] MP4 再生可: ${canPlayMP4}`);
-          const base=await loadFFmpegLocalWithPrompt(); log(`[診断] ffmpeg.min.js ロードOK（base=${base}）`);
-          await ensureFFmpeg(); log('[診断] ffmpeg.wasm 利用可能'); log('[診断] 成功');
-        }catch(e){ error('[診断] 失敗: '+(e?.message||e)); }
-        finally{ ensureCutState(); }
-      });
-
-      // ===== 実時間モード：プレビュー挙動で連続再生（録画用） =====
-      async function playSegmentsWithSkip(player, segments) {
-        if (!segments.length) return;
-        let idx=0; const dur=player.duration || (analysis?.duration ?? 0);
-        return new Promise((resolve)=>{
-          let rafId=0, ended=false;
-          function jumpTo(i){ if(i>=segments.length){ stop(); return; } const s=segments[i]; player.currentTime=Math.min(Math.max(0,s.start), dur||s.start+0.001); player.play().catch(()=>{}); }
-          function stop(){ if(ended) return; ended=true; cancelAnimationFrame(rafId); player.pause(); resolve(); }
-          function tick(){
-            if(ended) return;
-            const t=player.currentTime, seg=segments[idx];
-            if(!(t>=seg.start && t<seg.end)){
-              if(t<seg.start){ player.currentTime=seg.start; }
-              else{ idx++; if(idx>=segments.length){ stop(); return; } player.currentTime=segments[idx].start; }
-            }else{
-              if(t>=seg.end){ idx++; if(idx>=segments.length){ stop(); return; } player.currentTime=segments[idx].start; }
-            }
-            rafId=requestAnimationFrame(tick);
-          }
-          jumpTo(0); rafId=requestAnimationFrame(tick);
-        });
-      }
-
-      // MediaRecorderで録画（MP4優先、なければWebM→ffmpegでMP4変換）
-      async function recordPreviewToMP4(player, segments, preferredName){
-        const prevMuted=player.muted, prevVolume=player.volume; player.muted=false; player.volume=0;
-        const stream=player.captureStream?player.captureStream():(player.mozCaptureStream?player.mozCaptureStream():null);
-        if(!stream) throw new Error('このブラウザは captureStream() をサポートしていません。');
-        const mp4Mime='video/mp4;codecs="avc1.42E01E,mp4a.40.2"', webmVp9='video/webm;codecs="vp9,opus"', webmVp8='video/webm;codecs="vp8,opus"';
-        let mimeType=''; if('MediaRecorder' in window && MediaRecorder.isTypeSupported(mp4Mime)) mimeType=mp4Mime;
-        else if('MediaRecorder' in window && MediaRecorder.isTypeSupported(webmVp9)) mimeType=webmVp9;
-        else if('MediaRecorder' in window && MediaRecorder.isTypeSupported(webmVp8)) mimeType=webmVp8;
-        else throw new Error('このブラウザは MediaRecorder 録画（mp4/webm）に対応していません。');
-
-        const chunks=[]; const rec=new MediaRecorder(stream,{mimeType});
-        rec.ondataavailable=(e)=>{ if(e.data && e.data.size) chunks.push(e.data); };
-        const started=new Promise(res=>rec.onstart=res); const stopped=new Promise(res=>rec.onstop=res);
-        rec.start(250); await started; await playSegmentsWithSkip(player,segments); await new Promise(r=>setTimeout(r,100)); rec.stop(); await stopped;
-        player.muted=prevMuted; player.volume=prevVolume;
-        const recordedBlob=new Blob(chunks,{type:rec.mimeType});
-        if(rec.mimeType.startsWith('video/mp4')) return { blob: recordedBlob, name: ensureMp4Name(preferredName) };
-
-        await ensureFFmpeg();
-        const inputBytes=new Uint8Array(await recordedBlob.arrayBuffer());
-        const inWbm='in.webm', outMp4='rec_out.mp4';
-        ffmpeg.FS('writeFile', inWbm, inputBytes);
-        await ffmpeg.run('-y','-i',inWbm,'-c:v','libx264','-pix_fmt','yuv420p','-preset','veryfast','-crf','22','-c:a','aac','-b:a','192k','-movflags','+faststart', outMp4);
-        const mp4Data=ffmpeg.FS('readFile', outMp4);
-        return { blob: new Blob([mp4Data],{type:'video/mp4'}), name: ensureMp4Name(preferredName) };
-      }
-
-      function ensureMp4Name(base){ let name=(base||els.outNameInput.value||'cut_output.mp4').trim(); if(!/\.(mp4)$/i.test(name)) name+='.mp4'; return name; }
-
-      async function saveBlobWithPickerOrDownload(blob, name){
-        try{
-          if('showSaveFilePicker' in window){
-            const handle=await window.showSaveFilePicker({ suggestedName:name, types:[{description:'MP4 Video', accept:{'video/mp4':['.mp4']}}] });
-            const stream=await handle.createWritable(); await stream.write(blob); await stream.close(); log(`ローカルに保存しました: ${handle.name}`); return;
-          }
-        }catch(e){ error('保存ダイアログが完了しませんでした。自動ダウンロードに切り替えます。'); }
-        const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download=name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(url),60000);
-        const sizeMB=(blob.size/1e6).toFixed(1);
-        els.outWrap.innerHTML = `
-          <div class="ok">✅ 書き出し完了: ${sizeMB} MB</div>
-          <video controls style="width:100%;max-height:360px;margin-top:8px;border:1px solid #1e2a34;border-radius:10px" src="${url}"></video>
-          <div style="margin-top:8px">
-            <a download="${name}" href="${url}"><button>もう一度ダウンロード</button></a>
-            <button class="secondary" id="resetBtn">別の動画でやり直す</button>
-          </div>`;
-        document.getElementById('resetBtn')?.addEventListener('click',()=>location.reload());
-      }
-      
-      function fsReadSizeSafe(path){
-  try{
-    const u8 = ffmpeg.FS('readFile', path); // 存在すれば Uint8Array
-    return u8 ? u8.length : 0;
-  }catch(_){
-    return 0; // 無ければ 0 扱い
+ <!-- ★ ffmpeg UMDローダ（Pages向け）：base正規化・既定値・FFmpegWASM→FFmpeg shim -->
+<script>
+  function sanitizeBase(b){ if(!b) return b; b=b.replace(/^\?ffbase=/,'').replace(/^\?/,''); return b.endsWith('/')?b:b+'/'; }
+  function getFFBaseOverride(){ const u=new URL(location.href); const p=u.searchParams.get('ffbase'); if(p){const v=sanitizeBase(p); localStorage.setItem('ffbase',v); return v;} const s=localStorage.getItem('ffbase'); return s?sanitizeBase(s):null; }
+  const hereDir = location.pathname.replace(/[^/]+$/,'');
+  if(location.hostname.endsWith('.github.io') && !window.__FFBASE_DEFAULT__){ const repo='/'+location.pathname.split('/')[1]+'/'; window.__FFBASE_DEFAULT__=repo+'assets/ffmpeg/'; }
+  function absolutePagesBase(){ const repo='/'+location.pathname.split('/')[1]+'/'; return repo+'assets/ffmpeg/'; }
+  function buildCandidates(){
+    const set=new Set();
+    if(location.hostname.endsWith('.github.io')) set.add(absolutePagesBase());
+    const ov=getFFBaseOverride(); if(ov) set.add(ov);
+    if(window.__FFBASE_DEFAULT__) set.add(window.__FFBASE_DEFAULT__);
+    ['./assets/ffmpeg/','./ffmpeg/', hereDir+'assets/ffmpeg/', hereDir+'ffmpeg/','../assets/ffmpeg/','../../assets/ffmpeg/'].forEach(b=>set.add(b.endsWith('/')?b:b+'/'));
+    return Array.from(set);
   }
-}
+  function loadScript(src,timeoutMs=8000){
+    return new Promise((resolve,reject)=>{
+      const s=document.createElement('script'); s.src=src; s.async=true;
+      let done=false; const tid=setTimeout(()=>{ if(done) return; done=true; s.remove(); reject(new Error('Timeout: '+src)); },timeoutMs);
+      s.onload=()=>{ if(done) return; done=true; clearTimeout(tid); resolve(); };
+      s.onerror=()=>{ if(done) return; done=true; clearTimeout(tid); reject(new Error('Failed: '+src)); };
+      document.head.appendChild(s);
+    });
+  }
+  function ensureFFmpegShim(ffbase){
+    if(window.FFmpeg && typeof window.FFmpeg.createFFmpeg==='function') return;
+    if(!window.FFmpegWASM || !window.FFmpegWASM.FFmpeg) return;
+    if(ffbase && !ffbase.endsWith('/')) ffbase+='/';
+    function createFFmpeg(opts){
+      const core=new window.FFmpegWASM.FFmpeg();
+      let logger=null, progress=null;
+      core.on('log',m=>{ if(logger) logger({type:'info', message:String(m && m.message!==undefined? m.message : m)}); });
+      core.on('progress',p=>{ const r=(p&&typeof p.ratio==='number')?p.ratio:0; if(progress) progress({ratio:r}); });
+      return {
+        load: ()=>core.load({ coreURL:(opts&&(opts.corePath||opts.coreURL))||(ffbase+'ffmpeg-core.js'), wasmURL:(opts&&opts.wasmPath)||(ffbase+'ffmpeg-core.wasm'), workerURL:(opts&&opts.workerPath)||(ffbase+'ffmpeg-core.worker.js') }),
+        run: (...argv)=>core.exec(argv),
+        FS: (op,...rest)=>{
+          switch(op){
+            case 'writeFile': return core.writeFile(rest[0],rest[1]);
+            case 'readFile' : return core.readFile(rest[0],'binary');
+            case 'unlink'   : return core.deleteFile(rest[0]);
+            case 'readdir'  : return core.listDir(rest[0]);
+            case 'mkdir'    : return core.createDir(rest[0]);
+            case 'rmdir'    : return core.deleteDir(rest[0]);
+            default: throw new Error('Unsupported FS op');
+          }
+        },
+        setLogger:(fn)=>{logger=fn;},
+        setProgress:(fn)=>{progress=fn;},
+        terminate:()=>{ try{core.terminate();}catch(_){} }
+      };
+    }
+    async function fetchFile(input){
+      if(input instanceof Uint8Array) return input;
+      if(typeof Blob!=='undefined' && input instanceof Blob) return new Uint8Array(await input.arrayBuffer());
+      if(typeof input==='string'){ const res=await fetch(input); return new Uint8Array(await res.arrayBuffer()); }
+      if(input && typeof input.arrayBuffer==='function') return new Uint8Array(await input.arrayBuffer());
+      throw new Error('Unsupported input for fetchFile');
+    }
+    window.FFmpeg={createFFmpeg, fetchFile};
+  }
+  async function tryLoadLocalUMD(bases){
+    const tried=[];
+    for(const base of bases){
+      const url=base+'ffmpeg.min.js'; tried.push(url);
+      try{ await loadScript(url,8000); ensureFFmpegShim(base);
+        if(!(window.FFmpeg && window.FFmpeg.createFFmpeg && window.FFmpeg.fetchFile)) throw new Error('FFmpeg global missing after load');
+        window.__FFBASE_SELECTED__=base; return base;
+      }catch(e){ console.warn('[UMD/local] failed:',e.message); }
+    }
+    const logEl=document.getElementById('log');
+    if(logEl){ logEl.textContent+='\n❌ ffmpeg.min.js 探索失敗。試行URL:\n- '+tried.join('\n- '); logEl.scrollTop=logEl.scrollHeight; }
+    throw new Error('同一オリジンの ffmpeg.min.js を読めませんでした（配置パス/ファイル名/MIMEを確認）');
+  }
+  async function loadFFmpegLocalWithPrompt(){
+    try{ return await tryLoadLocalUMD(buildCandidates()); }
+    catch(e){
+      const hint='ffmpeg.min.js のあるフォルダURLを入力（例: ./assets/ffmpeg/ や /<repo>/assets/ffmpeg/ など）。\n次回以降は localStorage の ffbase に保存されます。';
+      const manual=prompt(hint, localStorage.getItem('ffbase')||(window.__FFBASE_DEFAULT__||'./assets/ffmpeg/'));
+      if(manual){ const base=sanitizeBase(manual); localStorage.setItem('ffbase',base); return await tryLoadLocalUMD([base]); }
+      throw e;
+    }
+  }
+  async function urlOk(u){ try{ const r=await fetch(u,{method:'HEAD',cache:'no-store'}); return r.ok; }catch{ return false; } }
+  async function pickWorkingFFBase(bases){ const names=['ffmpeg-core.js','ffmpeg-core.mjs']; for(const b of bases){ for(const n of names){ if(await urlOk(b+n)) return {base:b, core:n}; } } throw new Error('ffmpeg-core(.js|.mjs) が見つかりませんでした。'); }
+</script>
 
+<!-- ★ アプリ本体（高速=ffmpeg / 実時間=録画 の両対応。9B対策込み） -->
+<script>
+  if(window.__MUTEEDIT_INITED__){
+    console.warn('[muteedit] script already initialized; skipping re-init');
+  }else{
+    window.__MUTEEDIT_INITED__=true;
 
-      // ===== 高速モード：ffmpeg 再エンコード（堅牢化＆自動フォールバック） =====
-      async function exportViaFFmpeg(file){
-        await ensureFFmpeg();
-        const TINY_BYTES=50*1024; // 50KB未満は壊れ出力扱い
-        const { fetchFile } = FFmpeg;
-        ffmpeg.FS('writeFile','input.mp4', await fetchFile(file));
+    const els = {
+      file: document.getElementById('file'),
+      analyze: document.getElementById('analyzeBtn'),
+      recalc: document.getElementById('recalcBtn'),
+      cut: document.getElementById('cutBtn'),
+      wave: document.getElementById('wave'),
+      segList: document.getElementById('segList'),
+      thresh: document.getElementById('thresh'),
+      threshVal: document.getElementById('threshVal'),
+      minSil: document.getElementById('minSil'),
+      minSilVal: document.getElementById('minSilVal'),
+      pad: document.getElementById('pad'),
+      padVal: document.getElementById('padVal'),
+      win: document.getElementById('win'),
+      winVal: document.getElementById('winVal'),
+      live: document.getElementById('live'),
+      analysisMeta: document.getElementById('analysisMeta'),
+      log: document.getElementById('log'),
+      prog: document.getElementById('prog'),
+      outWrap: document.getElementById('outWrap'),
+      player: document.getElementById('player'),
+      previewToggle: document.getElementById('previewToggle'),
+      previewStart: document.getElementById('previewStart'),
+      previewStop: document.getElementById('previewStop'),
+      outNameInput: document.getElementById('outNameInput'),
+      crf: document.getElementById('crf'),
+      crfVal: document.getElementById('crfVal'),
+      preset: document.getElementById('preset'),
+      abitrate: document.getElementById('abitrate'),
+      exportMode: document.getElementById('exportMode'),
+      diagBtn: document.getElementById('diagBtn'),
+    };
+    function log(msg){ els.log.textContent+=`\n${msg}`; els.log.scrollTop=els.log.scrollHeight; }
+    function error(msg){ log(`❌ ${msg}`); }
 
-        // filter_complex 構築
-        const chains=[]; const maps=[];
-        keepSegments.forEach((s,i)=>{
-          const st=s.start.toFixed(3), en=s.end.toFixed(3);
-          chains.push(`[0:v]trim=start=${st}:end=${en},setpts=PTS-STARTPTS[v${i}]`);
-          // 音声は一度 aformat で正規化
-          chains.push(`[0:a]atrim=start=${st}:end=${en},asetpts=PTS-STARTPTS,aresample=48000, aformat=sample_fmts=fltp:channel_layouts=stereo[a${i}]`);
-          maps.push(`[v${i}][a${i}]`);
-        });
-        const filterAV=`${chains.join(';')};${maps.join('')}concat=n=${keepSegments.length}:v=1:a=1[v][a]`;
-        const outName='out.mp4';
-        let ok=false;
+    // 二重ハンドラ排除
+    function resetDomEventTarget(el){ const fresh=el.cloneNode(true); el.parentNode.replaceChild(fresh,el); return fresh; }
+    els.cut = resetDomEventTarget(els.cut);
+    els.previewStart = resetDomEventTarget(els.previewStart);
+    els.previewStop  = resetDomEventTarget(els.previewStop);
 
-        log('ffmpeg: AV 同時 concat 実行');
+    let decoded=null, analysis=null, keepSegments=[], inputBlobURL=null;
+    let previewOn=false, previewHandlersBound=false;
+
+    // ffmpeg
+    let ffmpeg=null, ffmpegReady=false, FF_BASE=null, FF_CORE_FILE='ffmpeg-core.js';
+
+    function ensureCutState(){ els.cut.disabled = !(decoded && analysis); }
+    let recomputeTimer=null; function debouncedRecompute(){ clearTimeout(recomputeTimer); recomputeTimer=setTimeout(()=>computeAnalysis(),160); }
+
+    async function ensureFFmpeg(){
+      if(ffmpegReady) return;
+      let umdBase;
+      try{ umdBase=await loadFFmpegLocalWithPrompt(); }
+      catch(e){ error(e.message + '\nヒント: URL末尾に ?ffbase=/'+location.pathname.split('/')[1]+'/assets/ffmpeg/ を付けて再読み込み'); throw e; }
+
+      const headCandidates=[]; if(location.hostname.endsWith('.github.io')) headCandidates.push(absolutePagesBase());
+      headCandidates.push(umdBase, ...buildCandidates());
+      try{ const picked=await pickWorkingFFBase(headCandidates); FF_BASE=picked.base; FF_CORE_FILE=picked.core; }
+      catch(e){ localStorage.removeItem('ffbase'); const picked=await pickWorkingFFBase(buildCandidates()); FF_BASE=picked.base; FF_CORE_FILE=picked.core; }
+
+      if(!(window.FFmpeg && FFmpeg.createFFmpeg && FFmpeg.fetchFile)) throw new Error('FFmpeg グローバルが見つかりません');
+
+      const { createFFmpeg } = FFmpeg;
+      ffmpeg=createFFmpeg({
+        corePath: FF_BASE+FF_CORE_FILE,
+        workerPath: FF_BASE+'ffmpeg-core.worker.js',
+        log:true,
+        logger:({type,message})=>{ els.log.textContent+=`\n[ffmpeg:${type}] ${message}`; els.log.scrollTop=els.log.scrollHeight; },
+        progress:({ratio})=>{ const r=Number.isFinite(ratio)?Math.min(1,Math.max(0,ratio)):0; els.prog.style.width=`${r*100}%`; }
+      });
+      log(`ffmpeg.wasm 起動中（base=${FF_BASE} core=${FF_CORE_FILE}）…`);
+      await ffmpeg.load(); ffmpegReady=true; log('ffmpeg.wasm 準備完了');
+    }
+
+    const syncLabels=()=>{ els.threshVal.textContent=`${els.thresh.value} dB`; els.minSilVal.textContent=`${els.minSil.value} ms`; els.padVal.textContent=`${els.pad.value} ms`; els.winVal.textContent=`${els.win.value} ms`; els.crfVal.textContent=`CRF ${els.crf.value}`; };
+    ['thresh','minSil','pad','win','crf'].forEach(id=>els[id].addEventListener('input',()=>{ syncLabels(); if(els.live.checked && decoded) debouncedRecompute(); else drawWave(analysis?.dbfs||[]); }));
+    syncLabels();
+
+    els.file.addEventListener('change',()=>{
+      const f=els.file.files?.[0];
+      if(!f){ els.analyze.disabled=true; ensureCutState(); return; }
+      els.analyze.disabled=false; els.recalc.disabled=true;
+      decoded=null; analysis=null; keepSegments=[];
+      drawWave([]); els.segList.textContent='解析待ち…'; els.outWrap.innerHTML='';
+      ensureCutState(); log(`選択: ${f.name} (${(f.size/1e6).toFixed(1)} MB)`);
+      if(inputBlobURL) URL.revokeObjectURL(inputBlobURL);
+      inputBlobURL=URL.createObjectURL(f);
+      els.player.src=inputBlobURL; els.player.load();
+      els.previewStart.disabled=false; els.previewStop.disabled=false; els.previewToggle.disabled=true;
+    });
+
+    els.analyze.addEventListener('click', async()=>{
+      const file=els.file.files?.[0]; if(!file) return;
+      els.analyze.disabled=true; log('音声デコード中…');
+      try{
+        const ac=new (window.AudioContext||window.webkitAudioContext)();
+        const buf=await ac.decodeAudioData(await file.arrayBuffer());
+        decoded={audioBuffer:buf, duration:buf.duration};
+        log(`Audio decoded: ${buf.duration.toFixed(3)} sec, ch=${buf.numberOfChannels}, sr=${buf.sampleRate}`);
+        await computeAnalysis();
+        els.recalc.disabled=false; els.previewToggle.disabled=false; els.previewStart.disabled=false; els.previewStop.disabled=false;
+      }catch(err){ error(`デコードに失敗: ${err?.message||err}`); els.analyze.disabled=false; }
+      finally{ ensureCutState(); }
+    });
+
+    els.recalc.addEventListener('click', async()=>{ if(!decoded) return; await computeAnalysis(); });
+
+    async function computeAnalysis(){
+      if(!decoded){ ensureCutState(); return; }
+      try{
+        const {audioBuffer, duration}=decoded; const sr=audioBuffer.sampleRate; const ch=audioBuffer.numberOfChannels;
+        const winMs=+els.win.value; const stepSamples=Math.max(1,Math.round((winMs/1000)*sr));
+        const len=Math.ceil(audioBuffer.length/stepSamples); const dbfs=new Float32Array(len);
+        const eps=1e-12; const chData=Array.from({length:ch},(_,i)=>audioBuffer.getChannelData(i));
+        let idx=0; for(let s=0;s<audioBuffer.length;s+=stepSamples){
+          const end=Math.min(s+stepSamples,audioBuffer.length); let sumsq=0,count=0;
+          for(let i=s;i<end;i++){ let sample=0; for(let c=0;c<ch;c++) sample+=chData[c][i]||0; sample/=ch; sumsq+=sample*sample; count++; }
+          const rms=Math.sqrt(sumsq/Math.max(1,count)); dbfs[idx++]=20*Math.log10(Math.max(rms,eps));
+        }
+        analysis={dbfs, stepSec:stepSamples/sr, duration};
+
+        const thr=+els.thresh.value; const minSil=+els.minSil.value/1000; const pad=+els.pad.value/1000;
+        keepSegments=buildKeepSegments(dbfs,analysis.stepSec,duration,thr,minSil,pad);
+        els.analysisMeta.textContent=`検出ウィンドウ: ${winMs}ms, サンプル数: ${dbfs.length}, 残す区間: ${keepSegments.length} 個`;
+        drawWave(dbfs); renderSegments();
+
+        ensureCutState();
+        if(keepSegments.length>0) els.cut.disabled=false;
+
+        if(previewOn){ const seg=withinKeep(els.player.currentTime); if(!seg && keepSegments[0]) els.player.currentTime=keepSegments[0].start; }
+      }catch(e){ error(`解析エラー: ${e?.message||e}`); }
+      finally{ ensureCutState(); }
+    }
+
+    function buildKeepSegments(dbfs, step, duration, thr, minSil, pad){
+      const mask=dbfs.map(v=>v>=thr?1:0); const segs=[]; let runStart=null;
+      for(let i=0;i<mask.length;i++){
+        if(mask[i]===1 && runStart===null) runStart=i;
+        if((mask[i]===0 || i===mask.length-1) && runStart!==null){
+          const last=(mask[i]===0?i-1:i); const st=runStart*step; const en=Math.min((last+1)*step,duration);
+          segs.push({start:st,end:en}); runStart=null;
+        }
+      }
+      const merged=[]; for(const s of segs){ const prev=merged[merged.length-1];
+        if(prev && s.start-prev.end<minSil) prev.end=s.end; else merged.push({...s}); }
+      return merged.map(s=>({start:Math.max(0,s.start-pad), end:Math.min(duration,s.end+pad)}));
+    }
+
+    function drawWave(dbfs){
+      const canvas=els.wave; const dpr=window.devicePixelRatio||1; const W=canvas.clientWidth; const H=canvas.clientHeight;
+      canvas.width=Math.floor(W*dpr); canvas.height=Math.floor(H*dpr); const ctx=canvas.getContext('2d');
+      ctx.setTransform(dpr,0,0,dpr,0,0); ctx.clearRect(0,0,W,H);
+      ctx.strokeStyle='#1f2a35'; ctx.lineWidth=1; ctx.beginPath(); for(let y=0;y<=4;y++){ const yy=(H-20)*(y/4)+10; ctx.moveTo(8,yy); ctx.lineTo(W-8,yy);} ctx.stroke();
+      const toY=v=>{ const clamped=Math.max(-90,Math.min(0,v||-90)); const t=(clamped+90)/90; return 10+(1-t)*(H-20); };
+      const tToX=t=>10+((t/(analysis?.duration||1))*(W-20));
+      if(analysis && keepSegments.length){ ctx.fillStyle='rgba(108,225,166,0.18)'; keepSegments.forEach(s=>{ const x1=tToX(s.start),x2=tToX(s.end); ctx.fillRect(x1,10,Math.max(1,x2-x1),H-20); }); }
+      if(dbfs && dbfs.length){ ctx.strokeStyle='#6ce1a6'; ctx.lineWidth=1; ctx.beginPath(); for(let i=0;i<dbfs.length;i++){ const x=10+(i/(dbfs.length-1))*(W-20); const y=toY(dbfs[i]); if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);} ctx.stroke(); }
+      const thr=+els.thresh.value; const ythr=toY(thr); ctx.strokeStyle='#4aa3ff'; ctx.setLineDash([4,4]); ctx.beginPath(); ctx.moveTo(8,ythr); ctx.lineTo(W-8,ythr); ctx.stroke(); ctx.setLineDash([]);
+    }
+
+    function renderSegments(){
+      if(!keepSegments.length){ els.segList.innerHTML='<div>検出された保持区間はありません。しきい値を下げてください。</div>'; return; }
+      const fmt=t=> new Date(t*1000).toISOString().substring(11,23);
+      els.segList.innerHTML=keepSegments.map((s,i)=>`<div>#${i+1} <span class="mono">${fmt(s.start)}</span> → <span class="mono">${fmt(s.end)}</span> <span class="hint">(${(s.end-s.start).toFixed(2)}s)</span></div>`).join('');
+    }
+
+    function withinKeep(t){ for(const seg of keepSegments){ if(t>=seg.start && t<seg.end) return seg; } return null; }
+    function nextKeepStartAfter(t){ for(const seg of keepSegments){ if(seg.end<=t) continue; if(t<seg.start) return seg.start; } return null; }
+    function bindPreviewHandlers(){
+      if(previewHandlersBound) return;
+      els.player.addEventListener('timeupdate',()=>{ if(!previewOn || !keepSegments.length) return;
+        const t=els.player.currentTime; const seg=withinKeep(t);
+        if(!seg){ const nextStart=nextKeepStartAfter(t); if(nextStart!=null) els.player.currentTime=nextStart; else els.player.pause(); }
+      });
+      previewHandlersBound=true;
+    }
+    bindPreviewHandlers();
+    els.player.addEventListener('loadedmetadata', ()=>{ log(`メタデータ取得: duration=${(els.player.duration||0).toFixed(2)}s`); });
+    els.previewToggle.addEventListener('change',()=>{ previewOn=!!els.previewToggle.checked; if(previewOn && keepSegments.length){ els.player.currentTime=keepSegments[0].start; } });
+    els.previewStart.addEventListener('click',()=>{ if(keepSegments.length && previewOn){ els.player.currentTime=keepSegments[0].start; } els.player.play(); });
+    els.previewStop.addEventListener('click',()=>{ els.player.pause(); });
+
+    els.wave.addEventListener('click',(e)=>{ if(!analysis) return;
+      const rect=els.wave.getBoundingClientRect(); const x=(e.clientX-rect.left)/rect.width; const t=x*analysis.duration;
+      if(previewOn){ const seg=withinKeep(t); if(!seg){ const nxt=nextKeepStartAfter(t); if(nxt!=null) els.player.currentTime=nxt; else els.player.pause(); return; } }
+      els.player.currentTime=t;
+    });
+
+    els.diagBtn.addEventListener('click', async()=>{
+      log('[診断] 開始');
+      try{
+        const canPlayMP4=!!document.createElement('video').canPlayType('video/mp4'); log(`[診断] MP4 再生可: ${canPlayMP4}`);
+        const base=await loadFFmpegLocalWithPrompt(); log(`[診断] ffmpeg.min.js ロードOK（base=${base}）`);
+        await ensureFFmpeg(); log('[診断] ffmpeg.wasm 利用可能'); log('[診断] 成功');
+      }catch(e){ error('[診断] 失敗: '+(e?.message||e)); }
+      finally{ ensureCutState(); }
+    });
+
+    // ---- サイズ検査（stat不要・readFile長で判定） ----
+    function fsReadSizeSafe(path){
+      try{ const u8=ffmpeg.FS('readFile', path); return u8 ? u8.length : 0; }
+      catch(_){ return 0; }
+    }
+
+    // ===== 実時間モード：プレビュー挙動で連続再生（録画用） =====
+    async function playSegmentsWithSkip(player, segments) {
+      if (!segments.length) return;
+      let idx=0; const dur=player.duration || (analysis?.duration ?? 0);
+      return new Promise((resolve)=>{
+        let rafId=0, ended=false;
+        function jumpTo(i){ if(i>=segments.length){ stop(); return; } const s=segments[i]; player.currentTime=Math.min(Math.max(0,s.start), dur||s.start+0.001); player.play().catch(()=>{}); }
+        function stop(){ if(ended) return; ended=true; cancelAnimationFrame(rafId); player.pause(); resolve(); }
+        function tick(){
+          if(ended) return;
+          const t=player.currentTime, seg=segments[idx];
+          if(!(t>=seg.start && t<seg.end)){
+            if(t<seg.start){ player.currentTime=seg.start; }
+            else{ idx++; if(idx>=segments.length){ stop(); return; } player.currentTime=segments[idx].start; }
+          }else{
+            if(t>=seg.end){ idx++; if(idx>=segments.length){ stop(); return; } player.currentTime=segments[idx].start; }
+          }
+          rafId=requestAnimationFrame(tick);
+        }
+        jumpTo(0); rafId=requestAnimationFrame(tick);
+      });
+    }
+
+    // MediaRecorderで録画（MP4優先、なければWebM→ffmpegでMP4変換）
+    async function recordPreviewToMP4(player, segments, preferredName){
+      const prevMuted=player.muted, prevVolume=player.volume; player.muted=false; player.volume=0;
+      const stream=player.captureStream?player.captureStream():(player.mozCaptureStream?player.mozCaptureStream():null);
+      if(!stream) throw new Error('このブラウザは captureStream() をサポートしていません。');
+      const mp4Mime='video/mp4;codecs="avc1.42E01E,mp4a.40.2"', webmVp9='video/webm;codecs="vp9,opus"', webmVp8='video/webm;codecs="vp8,opus"';
+      let mimeType=''; if('MediaRecorder' in window && MediaRecorder.isTypeSupported(mp4Mime)) mimeType=mp4Mime;
+      else if('MediaRecorder' in window && MediaRecorder.isTypeSupported(webmVp9)) mimeType=webmVp9;
+      else if('MediaRecorder' in window && MediaRecorder.isTypeSupported(webmVp8)) mimeType=webmVp8;
+      else throw new Error('このブラウザは MediaRecorder 録画（mp4/webm）に対応していません。');
+
+      const chunks=[]; const rec=new MediaRecorder(stream,{mimeType});
+      rec.ondataavailable=(e)=>{ if(e.data && e.data.size) chunks.push(e.data); };
+      const started=new Promise(res=>rec.onstart=res); const stopped=new Promise(res=>rec.onstop=res);
+      rec.start(250); await started; await playSegmentsWithSkip(player,segments); await new Promise(r=>setTimeout(r,100)); rec.stop(); await stopped;
+      player.muted=prevMuted; player.volume=prevVolume;
+      const recordedBlob=new Blob(chunks,{type:rec.mimeType});
+      if(rec.mimeType.startsWith('video/mp4')) return { blob: recordedBlob, name: ensureMp4Name(preferredName) };
+
+      await ensureFFmpeg();
+      const inputBytes=new Uint8Array(await recordedBlob.arrayBuffer());
+      const inWbm='in.webm', outMp4='rec_out.mp4';
+      ffmpeg.FS('writeFile', inWbm, inputBytes);
+      await ffmpeg.run('-y','-i',inWbm,'-c:v','libx264','-pix_fmt','yuv420p','-preset','veryfast','-crf','22','-c:a','aac','-b:a','192k','-movflags','+faststart', outMp4);
+      const mp4Data=ffmpeg.FS('readFile', outMp4);
+      return { blob: new Blob([mp4Data],{type:'video/mp4'}), name: ensureMp4Name(preferredName) };
+    }
+
+    function ensureMp4Name(base){ let name=(base||els.outNameInput.value||'cut_output.mp4').trim(); if(!/\.mp4$/i.test(name)) name+='.mp4'; return name; }
+
+    async function saveBlobWithPickerOrDownload(blob, name){
+      try{
+        if('showSaveFilePicker' in window){
+          const handle=await window.showSaveFilePicker({ suggestedName:name, types:[{description:'MP4 Video', accept:{'video/mp4':['.mp4']}}] });
+          const stream=await handle.createWritable(); await stream.write(blob); await stream.close(); log(`ローカルに保存しました: ${handle.name}`); return;
+        }
+      }catch(e){ error('保存ダイアログが完了しませんでした。自動ダウンロードに切り替えます。'); }
+      const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download=name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(url),60000);
+      const sizeMB=(blob.size/1e6).toFixed(1);
+      els.outWrap.innerHTML = `
+        <div class="ok">✅ 書き出し完了: ${sizeMB} MB</div>
+        <video controls style="width:100%;max-height:360px;margin-top:8px;border:1px solid #1e2a34;border-radius:10px" src="${url}"></video>
+        <div style="margin-top:8px">
+          <a download="${name}" href="${url}"><button>もう一度ダウンロード</button></a>
+          <button class="secondary" id="resetBtn">別の動画でやり直す</button>
+        </div>`;
+      document.getElementById('resetBtn')?.addEventListener('click',()=>location.reload());
+    }
+
+    // ===== 高速モード：ffmpeg 再エンコード（堅牢化＆自動フォールバック） =====
+    async function exportViaFFmpeg(file){
+      await ensureFFmpeg();
+      const TINY_BYTES=50*1024; // 50KB未満は壊れ出力扱い
+      const { fetchFile } = FFmpeg;
+      ffmpeg.FS('writeFile','input.mp4', await fetchFile(file));
+
+      // filter_complex 構築
+      const chains=[]; const maps=[];
+      keepSegments.forEach((s,i)=>{
+        const st=s.start.toFixed(3), en=s.end.toFixed(3);
+        chains.push(`[0:v]trim=start=${st}:end=${en},setpts=PTS-STARTPTS[v${i}]`);
+        // 音声は一度 aresample/aformat で正規化（スペース無しで連結）
+        chains.push(`[0:a]atrim=start=${st}:end=${en},asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a${i}]`);
+        maps.push(`[v${i}][a${i}]`);
+      });
+      const filterAV=`${chains.join(';')};${maps.join('')}concat=n=${keepSegments.length}:v=1:a=1[v][a]`;
+      const outName='out.mp4';
+      let ok=false;
+
+      log('ffmpeg: AV 同時 concat 実行');
+      try{
+        await ffmpeg.run(
+          '-y','-fflags','+genpts',
+          '-i','input.mp4',
+          '-filter_complex',filterAV,'-map','[v]','-map','[a]',
+          '-vsync','vfr',
+          '-c:v','libx264','-pix_fmt','yuv420p','-preset',els.preset.value,'-crf',String(els.crf.value),
+          '-c:a','aac','-b:a',els.abitrate.value,'-ar','48000','-ac','2',
+          '-movflags','+faststart',
+          outName
+        );
+        const bytes = fsReadSizeSafe(outName);
+        if (bytes > TINY_BYTES) { ok = true; }
+        else { log(`出力が小さすぎます（${bytes} bytes）→ 映像のみフォールバック`); }
+      }catch(e){ log('一次変換例外 → 映像のみフォールバック'); }
+
+      if(!ok){
         try{
+          const chainsV=keepSegments.map((s,i)=>`[0:v]trim=start=${s.start.toFixed(3)}:end=${s.end.toFixed(3)},setpts=PTS-STARTPTS[v${i}]`).join(';');
+          const catV=keepSegments.map((_,i)=>`[v${i}]`).join('');
+          const filterV = `${chainsV};${catV}concat=n=${keepSegments.length}:v=1:a=0[v]`;
           await ffmpeg.run(
             '-y','-fflags','+genpts',
             '-i','input.mp4',
-            '-filter_complex',filterAV,'-map','[v]','-map','[a]',
+            '-filter_complex',filterV,'-map','[v]',
             '-vsync','vfr',
             '-c:v','libx264','-pix_fmt','yuv420p','-preset',els.preset.value,'-crf',String(els.crf.value),
-            '-c:a','aac','-b:a',els.abitrate.value,'-ar','48000','-ac','2',
             '-movflags','+faststart',
             outName
-            // --- AV 同時 concat 実行の直後 ---
-const bytes = fsReadSizeSafe(outName);
-if (bytes > TINY_BYTES) {
-  ok = true;
-} else {
-  log(`出力が小さすぎます（${bytes} bytes）→ 映像のみフォールバック`);
-}
-
-// --- 映像のみフォールバックの直後 ---
-const bytes2 = fsReadSizeSafe(outName);
-if (bytes2 <= TINY_BYTES) {
-  throw new Error(`フォールバック後も小さすぎる（${bytes2} bytes）`);
-}
-
           );
-        }catch(e){ log('一次変換例外 → 映像のみフォールバック'); }
-
-        if(!ok){
-          try{
-            const chainsV=keepSegments.map((s,i)=>`[0:v]trim=start=${s.start.toFixed(3)}:end=${s.end.toFixed(3)},setpts=PTS-STARTPTS[v${i}]`).join(';');
-            const catV=keepSegments.map((_,i)=>`[v${i}]`).join('');
-            const filterV = `${chainsV};${catV}concat=n=${keepSegments.length}:v=1:a=0[v]`;
-            await ffmpeg.run(
-              '-y','-fflags','+genpts',
-              '-i','input.mp4',
-              '-filter_complex',filterV,'-map','[v]',
-              '-vsync','vfr',
-              '-c:v','libx264','-pix_fmt','yuv420p','-preset',els.preset.value,'-crf',String(els.crf.value),
-              '-movflags','+faststart',
-              outName
-            );
-            // --- AV 同時 concat 実行の直後 ---
-const bytes = fsReadSizeSafe(outName);
-if (bytes > TINY_BYTES) {
-  ok = true;
-} else {
-  log(`出力が小さすぎます（${bytes} bytes）→ 映像のみフォールバック`);
-}
-
-// --- 映像のみフォールバックの直後 ---
-const bytes2 = fsReadSizeSafe(outName);
-if (bytes2 <= TINY_BYTES) {
-  throw new Error(`フォールバック後も小さすぎる（${bytes2} bytes）`);
-}
-
-
-          }catch(e2){
-            throw new Error('[ffmpeg] 変換に失敗しました。実時間モードへ自動切替します。理由: '+(e2?.message||e2));
-          }
+          const bytes2 = fsReadSizeSafe(outName);
+          if (bytes2 <= TINY_BYTES) throw new Error(`フォールバック後も小さすぎる（${bytes2} bytes）`);
+        }catch(e2){
+          throw new Error('[ffmpeg] 変換に失敗しました。実時間モードへ自動切替します。理由: '+(e2?.message||e2));
         }
-
-        const data=ffmpeg.FS('readFile', outName);
-        return new Blob([data],{type:'video/mp4'});
       }
 
-      // ===== メイン「書き出し」ハンドラ（方式トグル対応） =====
-      els.cut.addEventListener('click', async()=>{
-        if(!Array.isArray(keepSegments) || keepSegments.length===0){ error('保持区間がありません。しきい値↓ / 最小無音長↓ で再計算してください。'); els.segList.scrollIntoView({behavior:'smooth'}); return; }
-        const f=els.file.files?.[0]; if(!f){ error('入力ファイルがありません。動画を選択→解析してください。'); return; }
+      const data=ffmpeg.FS('readFile', outName);
+      return new Blob([data],{type:'video/mp4'});
+    }
 
-        els.cut.disabled=true; els.recalc.disabled=true; els.analyze.disabled=true; els.prog.style.width='0%';
-        const mode=els.exportMode.value; let finalBlob=null; let finalName=(els.outNameInput.value||'cut_output.mp4').trim(); if(!/\.mp4$/i.test(finalName)) finalName+='.mp4';
+    // ===== メイン「書き出し」ハンドラ（方式トグル対応） =====
+    els.cut.addEventListener('click', async()=>{
+      if(!Array.isArray(keepSegments) || keepSegments.length===0){ error('保持区間がありません。しきい値↓ / 最小無音長↓ で再計算してください。'); els.segList.scrollIntoView({behavior:'smooth'}); return; }
+      const f=els.file.files?.[0]; if(!f){ error('入力ファイルがありません。動画を選択→解析してください。'); return; }
 
-        try{
-          if(mode==='fast'){
-            log('書き出し開始（高速: ffmpeg再エンコード）…');
-            try{
-              const blob=await exportViaFFmpeg(f);
-              if(!blob || blob.size<2000) throw new Error(`出力が小さすぎます（${blob?.size||0} bytes）`);
-              finalBlob=blob;
-            }catch(fferr){
-              error(String(fferr)); log('→ 安全フォールバック（実時間: プレビュー録画）に切替');
-              const rec=await recordPreviewToMP4(els.player, keepSegments, finalName);
-              if(!rec.blob || rec.blob.size<2000) throw new Error(`録画結果が小さすぎます（${rec.blob?.size||0} bytes）`);
-              finalBlob=rec.blob; finalName=rec.name;
-            }
-          }else{
-            log('書き出し開始（実時間: プレビュー録画）…');
+      els.cut.disabled=true; els.recalc.disabled=true; els.analyze.disabled=true; els.prog.style.width='0%';
+      const mode=els.exportMode?.value || 'fast';
+      let finalBlob=null; let finalName=(els.outNameInput.value||'cut_output.mp4').trim(); if(!/\.mp4$/i.test(finalName)) finalName+='.mp4';
+
+      try{
+        if(mode==='fast'){
+          log('書き出し開始（高速: ffmpeg再エンコード）…');
+          try{
+            const blob=await exportViaFFmpeg(f);
+            if(!blob || blob.size<2000) throw new Error(`出力が小さすぎます（${blob?.size||0} bytes）`);
+            finalBlob=blob;
+          }catch(fferr){
+            error(String(fferr)); log('→ 安全フォールバック（実時間: プレビュー録画）に切替');
             const rec=await recordPreviewToMP4(els.player, keepSegments, finalName);
             if(!rec.blob || rec.blob.size<2000) throw new Error(`録画結果が小さすぎます（${rec.blob?.size||0} bytes）`);
             finalBlob=rec.blob; finalName=rec.name;
           }
-
-          await saveBlobWithPickerOrDownload(finalBlob, finalName);
-          log('完了');
-        }catch(e){
-          error(e?.message||e);
-        }finally{
-          els.recalc.disabled=false; els.analyze.disabled=false; els.cut.disabled=false;
+        }else{
+          log('書き出し開始（実時間: プレビュー録画）…');
+          const rec=await recordPreviewToMP4(els.player, keepSegments, finalName);
+          if(!rec.blob || rec.blob.size<2000) throw new Error(`録画結果が小さすぎます（${rec.blob?.size||0} bytes）`);
+          finalBlob=rec.blob; finalName=rec.name;
         }
-      });
-    }
-  </script>
+
+        await saveBlobWithPickerOrDownload(finalBlob, finalName);
+        log('完了');
+      }catch(e){
+        error(e?.message||e);
+      }finally{
+        els.recalc.disabled=false; els.analyze.disabled=false; els.cut.disabled=false;
+      }
+    });
+  }
+</script>
+
 </body>
 </html>
