@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>無音区間オートカット（GitHub Pages / ffmpeg.wasm）</title>
+  <title>無音区間オートカット（GitHub Pages / ffmpeg.wasm）- 安定版</title>
   <style>
     :root{ --bg:#0b0d10;--panel:#12161b;--muted:#8aa0b2;--text:#eaf2f9;--accent:#4aa3ff;--accent-2:#6ce1a6;--warn:#ffb86b;--err:#ff6b6b; }
     *{box-sizing:border-box}body{margin:0;font:15px/1.6 system-ui,-apple-system,Segoe UI,Roboto,"Hiragino Sans","Noto Sans JP",Arial,sans-serif;background:var(--bg);color:var(--text)}
@@ -178,7 +178,7 @@
         <ul>
           <li>Web Audio API で短時間RMS → dBFS化し、<strong>しきい値</strong>・<strong>無音長</strong>・<strong>前後パディング</strong>で保持区間を抽出。</li>
           <li>書き出しは「高速: ffmpeg 再エンコード」または「実時間: プレビュー録画」を選択可能。</li>
-          <li>ffmpeg失敗・極小出力時は自動で安全にフォールバック（映像のみ → 実時間録画）。</li>
+          <li><b>安定化</b>：最小区間長の強制 / fps固定 / ピクセルフォーマット統一 / V-only自動フォールバック。</li>
           <li>ffmpegベースURLは <code>?ffbase=…</code> または自動推測。</li>
         </ul>
         <button id="diagBtn" class="secondary">環境診断を実行</button>
@@ -186,7 +186,7 @@
     </section>
   </div>
 
- <!-- ★ ffmpeg UMDローダ（Pages向け）：base正規化・既定値・FFmpegWASM→FFmpeg shim -->
+<!-- ★ ffmpeg UMDローダ（Pages向け）：base正規化・既定値・FFmpegWASM→FFmpeg shim -->
 <script>
   function sanitizeBase(b){ if(!b) return b; b=b.replace(/^\?ffbase=/,'').replace(/^\?/,''); return b.endsWith('/')?b:b+'/'; }
   function getFFBaseOverride(){ const u=new URL(location.href); const p=u.searchParams.get('ffbase'); if(p){const v=sanitizeBase(p); localStorage.setItem('ffbase',v); return v;} const s=localStorage.getItem('ffbase'); return s?sanitizeBase(s):null; }
@@ -213,7 +213,7 @@
   function ensureFFmpegShim(ffbase){
     if(window.FFmpeg && typeof window.FFmpeg.createFFmpeg==='function') return;
     if(!window.FFmpegWASM || !window.FFmpegWASM.FFmpeg) return;
-    if(ffbase && !ffbase.endsWith('/')) ffbase+='/';
+    if(ffbase && !ffbase.endsWith('/')) ffbase+='/'
     function createFFmpeg(opts){
       const core=new window.FFmpegWASM.FFmpeg();
       let logger=null, progress=null;
@@ -273,12 +273,17 @@
   async function pickWorkingFFBase(bases){ const names=['ffmpeg-core.js','ffmpeg-core.mjs']; for(const b of bases){ for(const n of names){ if(await urlOk(b+n)) return {base:b, core:n}; } } throw new Error('ffmpeg-core(.js|.mjs) が見つかりませんでした。'); }
 </script>
 
-<!-- ★ アプリ本体（高速=ffmpeg / 実時間=録画 の両対応。9B対策込み） -->
+<!-- ★ アプリ本体（安定化版：最小区間/固定fps/format/堅牢フォールバック） -->
 <script>
   if(window.__MUTEEDIT_INITED__){
     console.warn('[muteedit] script already initialized; skipping re-init');
   }else{
     window.__MUTEEDIT_INITED__=true;
+
+    // 安定化パラメータ
+    const FPS = 30;                      // 出力fps固定（24/25/30推奨）
+    const MIN_DUR = 2 / FPS;             // 最低2フレーム以上の区間のみ保持
+    const MAX_SEGS_FOR_FAST = 400;       // これを超えたらリアルタイム録画へ誘導
 
     const els = {
       file: document.getElementById('file'),
@@ -388,6 +393,12 @@
 
     els.recalc.addEventListener('click', async()=>{ if(!decoded) return; await computeAnalysis(); });
 
+    function enforceMinDur(segments, duration){
+      return segments
+        .map(s=>({start:Math.max(0,s.start), end:Math.min(duration,s.end)}))
+        .filter(s=> (s.end - s.start) >= MIN_DUR);
+    }
+
     async function computeAnalysis(){
       if(!decoded){ ensureCutState(); return; }
       try{
@@ -404,9 +415,15 @@
 
         const thr=+els.thresh.value; const minSil=+els.minSil.value/1000; const pad=+els.pad.value/1000;
         keepSegments=buildKeepSegments(dbfs,analysis.stepSec,duration,thr,minSil,pad);
-        els.analysisMeta.textContent=`検出ウィンドウ: ${winMs}ms, サンプル数: ${dbfs.length}, 残す区間: ${keepSegments.length} 個`;
-        drawWave(dbfs); renderSegments();
+        keepSegments=enforceMinDur(keepSegments, duration);
+        els.analysisMeta.textContent=`検出ウィンドウ: ${winMs}ms, サンプル数: ${dbfs.length}, 残す区間: ${keepSegments.length} 個 (min ${MIN_DUR.toFixed(3)}s)`;
 
+        // 多すぎる場合の警告
+        if(keepSegments.length>MAX_SEGS_FOR_FAST){
+          log(`[警告] 区間数が多い (${keepSegments.length}) ため、高速モードは失敗しやすいです。実時間モードを推奨します。`);
+        }
+
+        drawWave(dbfs); renderSegments();
         ensureCutState();
         if(keepSegments.length>0) els.cut.disabled=false;
 
@@ -520,9 +537,9 @@
       else throw new Error('このブラウザは MediaRecorder 録画（mp4/webm）に対応していません。');
 
       const chunks=[]; const rec=new MediaRecorder(stream,{mimeType});
-      rec.ondataavailable=(e)=>{ if(e.data && e.data.size > 0) chunks.push(e.data); }; // ★★★ 修正箇所 ★★★
+      rec.ondataavailable=(e)=>{ if(e.data && e.data.size > 0) chunks.push(e.data); };
       const started=new Promise(res=>rec.onstart=res); const stopped=new Promise(res=>rec.onstop=res);
-      rec.start(250); await started; await playSegmentsWithSkip(player,segments); await new Promise(r=>setTimeout(r,100)); rec.stop(); await stopped;
+      rec.start(250); await started; await playSegmentsWithSkip(player,segments); await new Promise(r=>setTimeout(r,120)); rec.stop(); await stopped;
       player.muted=prevMuted; player.volume=prevVolume;
       const recordedBlob=new Blob(chunks,{type:rec.mimeType});
       if(rec.mimeType.startsWith('video/mp4')) return { blob: recordedBlob, name: ensureMp4Name(preferredName) };
@@ -557,19 +574,27 @@
       document.getElementById('resetBtn')?.addEventListener('click',()=>location.reload());
     }
 
-    // ===== 高速モード：ffmpeg 再エンコード（堅牢化＆自動フォールバック） =====
+    // ===== 高速モード：ffmpeg 再エンコード（安定化） =====
     async function exportViaFFmpeg(file){
       await ensureFFmpeg();
       const TINY_BYTES=50*1024; // 50KB未満は壊れ出力扱い
       const { fetchFile } = FFmpeg;
       ffmpeg.FS('writeFile','input.mp4', await fetchFile(file));
 
-      // filter_complex 構築
+      // 先に短区間除去（再確認）
+      keepSegments = keepSegments.filter(s => (s.end - s.start) >= MIN_DUR);
+      if(keepSegments.length === 0) throw new Error('保持区間が短すぎます。しきい値/窓幅/パディングを調整してください。');
+
+      // セグメント多すぎなら実時間を勧める（ただし強行も可）
+      if(keepSegments.length > MAX_SEGS_FOR_FAST){
+        log(`[注意] 区間数 ${keepSegments.length} → ffmpeg グラフ巨大化の恐れ。実時間モードの方が安定します。`);
+      }
+
+      // filter_complex 構築（fps固定 + yuv420p）
       const chains=[]; const maps=[];
       keepSegments.forEach((s,i)=>{
         const st=s.start.toFixed(3), en=s.end.toFixed(3);
-        chains.push(`[0:v]trim=start=${st}:end=${en},setpts=PTS-STARTPTS[v${i}]`);
-        // 音声は一度 aresample/aformat で正規化（スペース無しで連結）
+        chains.push(`[0:v]trim=start=${st}:end=${en},setpts=PTS-STARTPTS,fps=${FPS},format=yuv420p[v${i}]`);
         chains.push(`[0:a]atrim=start=${st}:end=${en},asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a${i}]`);
         maps.push(`[v${i}][a${i}]`);
       });
@@ -583,7 +608,7 @@
           '-y','-fflags','+genpts',
           '-i','input.mp4',
           '-filter_complex',filterAV,'-map','[v]','-map','[a]',
-          '-vsync','vfr',
+          '-r', String(FPS),
           '-c:v','libx264','-pix_fmt','yuv420p','-preset',els.preset.value,'-crf',String(els.crf.value),
           '-c:a','aac','-b:a',els.abitrate.value,'-ar','48000','-ac','2',
           '-movflags','+faststart',
@@ -596,14 +621,14 @@
 
       if(!ok){
         try{
-          const chainsV=keepSegments.map((s,i)=>`[0:v]trim=start=${s.start.toFixed(3)}:end=${s.end.toFixed(3)},setpts=PTS-STARTPTS[v${i}]`).join(';');
+          const chainsV=keepSegments.map((s,i)=>`[0:v]trim=start=${s.start.toFixed(3)}:end=${s.end.toFixed(3)},setpts=PTS-STARTPTS,fps=${FPS},format=yuv420p[v${i}]`).join(';');
           const catV=keepSegments.map((_,i)=>`[v${i}]`).join('');
           const filterV = `${chainsV};${catV}concat=n=${keepSegments.length}:v=1:a=0[v]`;
           await ffmpeg.run(
             '-y','-fflags','+genpts',
             '-i','input.mp4',
             '-filter_complex',filterV,'-map','[v]',
-            '-vsync','vfr',
+            '-r', String(FPS),
             '-c:v','libx264','-pix_fmt','yuv420p','-preset',els.preset.value,'-crf',String(els.crf.value),
             '-movflags','+faststart',
             outName
