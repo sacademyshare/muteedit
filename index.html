@@ -209,21 +209,32 @@
       window.__FFBASE_DEFAULT__ = repo + 'assets/ffmpeg/';
     }
 
-    function buildCandidates(){
-      const cand = [];
-      const ov = getFFBaseOverride();
-      if (ov) cand.push(ov);
-      if (window.__FFBASE_DEFAULT__) cand.push(window.__FFBASE_DEFAULT__);
-      cand.push(
-        './assets/ffmpeg/',
-        './ffmpeg/',
-        hereDir + 'assets/ffmpeg/',
-        hereDir + 'ffmpeg/',
-        '../assets/ffmpeg/',
-        '../../assets/ffmpeg/'
-      );
-      return [...new Set(cand)].map(b => (b.endsWith('/')?b:b+'/'));
+ 
+  function buildCandidates(){
+    const set = new Set();
+
+    // GitHub Pages の絶対パスを最優先（相対より確実）
+    if (location.hostname.endsWith('.github.io')) {
+      set.add(absolutePagesBase());
     }
+
+    // 直指定のクエリ (?ffbase=...) は尊重
+    const ov = getFFBaseOverride();
+    if (ov) set.add(ov);
+
+    // 既定や相対候補も最後に
+    if (window.__FFBASE_DEFAULT__) set.add(window.__FFBASE_DEFAULT__);
+    [
+      './assets/ffmpeg/','./ffmpeg/',
+      location.pathname.replace(/[^/]+$/,'') + 'assets/ffmpeg/',
+      location.pathname.replace(/[^/]+$/,'') + 'ffmpeg/',
+      '../assets/ffmpeg/','../../assets/ffmpeg/'
+    ].forEach(b => set.add(b.endsWith('/') ? b : (b + '/')));
+
+    return Array.from(set);
+  }
+
+
 
     function loadScript(src, timeoutMs=8000){
       return new Promise((resolve,reject)=>{
@@ -373,26 +384,62 @@
     let decoded=null, analysis=null, keepSegments=[], inputBlobURL=null;
     let previewOn=false, previewHandlersBound=false;
 
-    // ffmpeg
-    let ffmpeg=null, ffmpegReady=false, FF_BASE=null;
-    async function ensureFFmpeg(){
-      if(ffmpegReady) return;
-      try{ FF_BASE = await loadFFmpegLocalWithPrompt(); }
-      catch(e){ error(e.message + '\nヒント: URL末尾に ?ffbase=./path/to/ を付けて再読み込み'); throw e; }
-      if(!(window.FFmpeg && FFmpeg.createFFmpeg && FFmpeg.fetchFile)){
-        throw new Error('ffmpeg.min.js は読み込まれましたが FFmpeg グローバルが見つかりません（バージョン/ファイル確認）');
-      }
-      const { createFFmpeg } = FFmpeg;
-      ffmpeg = createFFmpeg({
-        corePath: FF_BASE + 'ffmpeg-core.js',
-        log: true,
-        logger: ({ type, message }) => { els.log.textContent += `\n[ffmpeg:${type}] ${message}`; els.log.scrollTop = els.log.scrollHeight; },
-        progress: ({ ratio }) => { const r = Number.isFinite(ratio)?Math.min(1,Math.max(0,ratio)):0; els.prog.style.width = `${r*100}%`; }
-      });
-      log(`ffmpeg.wasm 起動中（base=${FF_BASE}）…`);
-      await ffmpeg.load();
-      ffmpegReady=true; log('ffmpeg.wasm 準備完了');
+
+  let ffmpeg=null, ffmpegReady=false, FF_BASE=null, FF_CORE_FILE='ffmpeg-core.js';
+
+  async function ensureFFmpeg(){
+    if (ffmpegReady) return;
+
+    // まず UMD を読ませる（ffmpeg.min.js をどこから読むかだけ決める）
+    let umdBase;
+    try {
+      umdBase = await loadFFmpegLocalWithPrompt(); // ← 既存。ffmpeg.min.js を読む
+    } catch(e) {
+      error(e.message + '\nヒント: URL末尾に ?ffbase=/<repo>/assets/ffmpeg/ を付けて再読み込み');
+      throw e;
     }
+
+    // 次に core (.js|.mjs) の実ファイルが本当にあるベースを検出
+    // 1) GitHub Pages の絶対 2) 直近の UMD ベース 3) その他候補 の順で試す
+    const headCandidates = [];
+    if (location.hostname.endsWith('.github.io')) headCandidates.push(absolutePagesBase());
+    headCandidates.push(umdBase, ...buildCandidates());
+
+    try {
+      const picked = await pickWorkingFFBase(headCandidates);
+      FF_BASE = picked.base;
+      FF_CORE_FILE = picked.core;
+    } catch (e) {
+      // localStorage の壊れ値が原因のことが多いのでクリアして再試行
+      localStorage.removeItem('ffbase');
+      const picked = await pickWorkingFFBase(buildCandidates());
+      FF_BASE = picked.base;
+      FF_CORE_FILE = picked.core;
+    }
+
+    // shim が入っていることを確認
+    if (!(window.FFmpeg && FFmpeg.createFFmpeg && FFmpeg.fetchFile)) {
+      throw new Error('FFmpeg グローバルが見つかりません（UMDの読み込みに失敗）');
+    }
+
+    const { createFFmpeg } = FFmpeg;
+    ffmpeg = createFFmpeg({
+      corePath: FF_BASE + FF_CORE_FILE,                    // ← .js / .mjs どちらにも対応
+      log: true,
+      logger: ({ type, message }) => { els.log.textContent += `\n[ffmpeg:${type}] ${message}`; els.log.scrollTop = els.log.scrollHeight; },
+      progress: ({ ratio }) => {
+        const r = Number.isFinite(ratio) ? Math.min(1, Math.max(0, ratio)) : 0;
+        els.prog.style.width = `${r*100}%`;
+      }
+    });
+
+    log(`ffmpeg.wasm 起動中（base=${FF_BASE} core=${FF_CORE_FILE}）…`);
+    await ffmpeg.load();
+    ffmpegReady = true;
+    log('ffmpeg.wasm 準備完了');
+  }
+
+
 
     const syncLabels=()=>{
       els.threshVal.textContent = `${els.thresh.value} dB`;
