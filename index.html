@@ -577,6 +577,34 @@
       }catch(e){ error(e?.message||e); }
       finally{ ensureCutState(); els.recalc.disabled=false; els.analyze.disabled=false; }
     });
+   
+  async function urlOk(u) {
+    try {
+      const r = await fetch(u, { method: 'HEAD', cache: 'no-store' });
+      return r.ok;
+    } catch { return false; }
+  }
+
+  async function pickWorkingFFBase(bases) {
+    // core の実ファイル名は .js / .mjs の揺れがある
+    const coreNames = ['ffmpeg-core.js', 'ffmpeg-core.mjs'];
+    for (const base of bases) {
+      for (const name of coreNames) {
+        if (await urlOk(base + name)) {
+          return { base, core: name };
+        }
+      }
+    }
+    throw new Error('ffmpeg-core(.js|.mjs) が見つかりませんでした。配置/公開ブランチを確認してください。');
+  }
+
+  function absolutePagesBase() {
+    // https://{user}.github.io/{repo}/assets/ffmpeg/
+    const repo = '/' + location.pathname.split('/')[1] + '/';
+    return repo + 'assets/ffmpeg/';
+  }
+
+
   </script>
 </body>
 </html>
