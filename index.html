@@ -186,7 +186,7 @@
     </section>
   </div>
 
-<!-- ★ ffmpeg UMDローダ（Pages向け）：base正規化・既定値・FFmpegWASM→FFmpeg shim -->
+ <!-- ★ ffmpeg UMDローダ（Pages向け）：base正規化・既定値・FFmpegWASM→FFmpeg shim -->
 <script>
   function sanitizeBase(b){ if(!b) return b; b=b.replace(/^\?ffbase=/,'').replace(/^\?/,''); return b.endsWith('/')?b:b+'/'; }
   function getFFBaseOverride(){ const u=new URL(location.href); const p=u.searchParams.get('ffbase'); if(p){const v=sanitizeBase(p); localStorage.setItem('ffbase',v); return v;} const s=localStorage.getItem('ffbase'); return s?sanitizeBase(s):null; }
@@ -273,7 +273,7 @@
   async function pickWorkingFFBase(bases){ const names=['ffmpeg-core.js','ffmpeg-core.mjs']; for(const b of bases){ for(const n of names){ if(await urlOk(b+n)) return {base:b, core:n}; } } throw new Error('ffmpeg-core(.js|.mjs) が見つかりませんでした。'); }
 </script>
 
-<!-- ★ アプリ本体（高速=ffmpeg / 実時間=録画 の両対応。9B対策＋極短セグメント排除） -->
+<!-- ★ アプリ本体（高速=ffmpeg / 実時間=録画 の両対応。9B対策込み） -->
 <script>
   if(window.__MUTEEDIT_INITED__){
     console.warn('[muteedit] script already initialized; skipping re-init');
@@ -479,23 +479,13 @@
       finally{ ensureCutState(); }
     });
 
-    // ---- サイズ検査（readFile 長で判定）＆セグメント整形 ----
+    // ---- サイズ検査（stat不要・readFile長で判定） ----
     function fsReadSizeSafe(path){
-      try{ const u8=ffmpeg.FS('readFile', path); return (u8 && typeof u8.length==='number') ? u8.length : 0; }
+      try{ const u8=ffmpeg.FS('readFile', path); return u8 ? u8.length : 0; }
       catch(_){ return 0; }
     }
-    function sanitizeSegments(segments){
-      const MIN_DUR = 0.05; // 50ms未満は捨てる（ゼロ長対策）
-      const sane = segments
-        .map(s=>({start:Math.max(0, +s.start), end:Math.max(0, +s.end)}))
-        .filter(s=>Number.isFinite(s.start)&&Number.isFinite(s.end)&&s.end-s.start>=MIN_DUR);
-      if(sane.length!==segments.length){
-        log(`一部の極短/不正セグメントを除外: ${segments.length} → ${sane.length}`);
-      }
-      return sane;
-    }
 
-    // ===== 実時間モード：プレビュー録画 =====
+    // ===== 実時間モード：プレビュー挙動で連続再生（録画用） =====
     async function playSegmentsWithSkip(player, segments) {
       if (!segments.length) return;
       let idx=0; const dur=player.duration || (analysis?.duration ?? 0);
@@ -517,6 +507,8 @@
         jumpTo(0); rafId=requestAnimationFrame(tick);
       });
     }
+
+    // MediaRecorderで録画（MP4優先、なければWebM→ffmpegでMP4変換）
     async function recordPreviewToMP4(player, segments, preferredName){
       const prevMuted=player.muted, prevVolume=player.volume; player.muted=false; player.volume=0;
       const stream=player.captureStream?player.captureStream():(player.mozCaptureStream?player.mozCaptureStream():null);
@@ -528,7 +520,7 @@
       else throw new Error('このブラウザは MediaRecorder 録画（mp4/webm）に対応していません。');
 
       const chunks=[]; const rec=new MediaRecorder(stream,{mimeType});
-      rec.ondataavailable=(e)=>{ if(e.data && e.data.size) chunks.push(e.data); };
+      rec.ondataavailable=(e)=>{ if(e.data && e.data.size > 0) chunks.push(e.data); }; // ★★★ 修正箇所 ★★★
       const started=new Promise(res=>rec.onstart=res); const stopped=new Promise(res=>rec.onstop=res);
       rec.start(250); await started; await playSegmentsWithSkip(player,segments); await new Promise(r=>setTimeout(r,100)); rec.stop(); await stopped;
       player.muted=prevMuted; player.volume=prevVolume;
@@ -572,19 +564,16 @@
       const { fetchFile } = FFmpeg;
       ffmpeg.FS('writeFile','input.mp4', await fetchFile(file));
 
-      // セグメントを事前に整形（ゼロ長/極短を除外）
-      const cleanSegs = sanitizeSegments(keepSegments);
-      if(!cleanSegs.length) throw new Error('有効な保持区間がありません（全て極短/無効）。しきい値や最小無音長を調整してください。');
-
       // filter_complex 構築
       const chains=[]; const maps=[];
-      cleanSegs.forEach((s,i)=>{
+      keepSegments.forEach((s,i)=>{
         const st=s.start.toFixed(3), en=s.end.toFixed(3);
         chains.push(`[0:v]trim=start=${st}:end=${en},setpts=PTS-STARTPTS[v${i}]`);
+        // 音声は一度 aresample/aformat で正規化（スペース無しで連結）
         chains.push(`[0:a]atrim=start=${st}:end=${en},asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a${i}]`);
         maps.push(`[v${i}][a${i}]`);
       });
-      const filterAV=`${chains.join(';')};${maps.join('')}concat=n=${cleanSegs.length}:v=1:a=1[v][a]`;
+      const filterAV=`${chains.join(';')};${maps.join('')}concat=n=${keepSegments.length}:v=1:a=1[v][a]`;
       const outName='out.mp4';
       let ok=false;
 
@@ -602,14 +591,14 @@
         );
         const bytes = fsReadSizeSafe(outName);
         if (bytes > TINY_BYTES) { ok = true; }
-        else { log(`出力が小さすぎます（${bytes ?? 0} bytes）→ 映像のみフォールバック`); }
+        else { log(`出力が小さすぎます（${bytes} bytes）→ 映像のみフォールバック`); }
       }catch(e){ log('一次変換例外 → 映像のみフォールバック'); }
 
       if(!ok){
         try{
-          const chainsV=cleanSegs.map((s,i)=>`[0:v]trim=start=${s.start.toFixed(3)}:end=${s.end.toFixed(3)},setpts=PTS-STARTPTS[v${i}]`).join(';');
-          const catV=cleanSegs.map((_,i)=>`[v${i}]`).join('');
-          const filterV = `${chainsV};${catV}concat=n=${cleanSegs.length}:v=1:a=0[v]`;
+          const chainsV=keepSegments.map((s,i)=>`[0:v]trim=start=${s.start.toFixed(3)}:end=${s.end.toFixed(3)},setpts=PTS-STARTPTS[v${i}]`).join(';');
+          const catV=keepSegments.map((_,i)=>`[v${i}]`).join('');
+          const filterV = `${chainsV};${catV}concat=n=${keepSegments.length}:v=1:a=0[v]`;
           await ffmpeg.run(
             '-y','-fflags','+genpts',
             '-i','input.mp4',
@@ -620,7 +609,7 @@
             outName
           );
           const bytes2 = fsReadSizeSafe(outName);
-          if (bytes2 <= TINY_BYTES) throw new Error(`フォールバック後も小さすぎる（${bytes2 ?? 0} bytes）`);
+          if (bytes2 <= TINY_BYTES) throw new Error(`フォールバック後も小さすぎる（${bytes2} bytes）`);
         }catch(e2){
           throw new Error('[ffmpeg] 変換に失敗しました。実時間モードへ自動切替します。理由: '+(e2?.message||e2));
         }
@@ -648,13 +637,13 @@
             finalBlob=blob;
           }catch(fferr){
             error(String(fferr)); log('→ 安全フォールバック（実時間: プレビュー録画）に切替');
-            const rec=await recordPreviewToMP4(els.player, sanitizeSegments(keepSegments), finalName);
+            const rec=await recordPreviewToMP4(els.player, keepSegments, finalName);
             if(!rec.blob || rec.blob.size<2000) throw new Error(`録画結果が小さすぎます（${rec.blob?.size||0} bytes）`);
             finalBlob=rec.blob; finalName=rec.name;
           }
         }else{
           log('書き出し開始（実時間: プレビュー録画）…');
-          const rec=await recordPreviewToMP4(els.player, sanitizeSegments(keepSegments), finalName);
+          const rec=await recordPreviewToMP4(els.player, keepSegments, finalName);
           if(!rec.blob || rec.blob.size<2000) throw new Error(`録画結果が小さすぎます（${rec.blob?.size||0} bytes）`);
           finalBlob=rec.blob; finalName=rec.name;
         }
