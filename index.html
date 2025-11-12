@@ -538,6 +538,16 @@
           </div>`;
         document.getElementById('resetBtn')?.addEventListener('click',()=>location.reload());
       }
+      
+      function fsReadSizeSafe(path){
+  try{
+    const u8 = ffmpeg.FS('readFile', path); // 存在すれば Uint8Array
+    return u8 ? u8.length : 0;
+  }catch(_){
+    return 0; // 無ければ 0 扱い
+  }
+}
+
 
       // ===== 高速モード：ffmpeg 再エンコード（堅牢化＆自動フォールバック） =====
       async function exportViaFFmpeg(file){
@@ -570,8 +580,21 @@
             '-c:a','aac','-b:a',els.abitrate.value,'-ar','48000','-ac','2',
             '-movflags','+faststart',
             outName
+            // --- AV 同時 concat 実行の直後 ---
+const bytes = fsReadSizeSafe(outName);
+if (bytes > TINY_BYTES) {
+  ok = true;
+} else {
+  log(`出力が小さすぎます（${bytes} bytes）→ 映像のみフォールバック`);
+}
+
+// --- 映像のみフォールバックの直後 ---
+const bytes2 = fsReadSizeSafe(outName);
+if (bytes2 <= TINY_BYTES) {
+  throw new Error(`フォールバック後も小さすぎる（${bytes2} bytes）`);
+}
+
           );
-          const stat=ffmpeg.FS('stat', outName); if(stat.size>TINY_BYTES) ok=true; else log(`出力が小さすぎます（${stat.size} bytes）→ 映像のみフォールバック`);
         }catch(e){ log('一次変換例外 → 映像のみフォールバック'); }
 
         if(!ok){
@@ -588,8 +611,21 @@
               '-movflags','+faststart',
               outName
             );
-            const stat2=ffmpeg.FS('stat', outName);
-            if(stat2.size<=TINY_BYTES) throw new Error(`フォールバック後も小さすぎる（${stat2.size} bytes）`);
+            // --- AV 同時 concat 実行の直後 ---
+const bytes = fsReadSizeSafe(outName);
+if (bytes > TINY_BYTES) {
+  ok = true;
+} else {
+  log(`出力が小さすぎます（${bytes} bytes）→ 映像のみフォールバック`);
+}
+
+// --- 映像のみフォールバックの直後 ---
+const bytes2 = fsReadSizeSafe(outName);
+if (bytes2 <= TINY_BYTES) {
+  throw new Error(`フォールバック後も小さすぎる（${bytes2} bytes）`);
+}
+
+
           }catch(e2){
             throw new Error('[ffmpeg] 変換に失敗しました。実時間モードへ自動切替します。理由: '+(e2?.message||e2));
           }
