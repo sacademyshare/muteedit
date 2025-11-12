@@ -367,7 +367,7 @@
   }
 </script>
 
-<!-- ★ アプリ本体 -->
+<!-- ★ アプリ本体（プレビューと同じ挙動を録画しMP4に保存） -->
 <script>
   const els = {
     file: document.getElementById('file'),
@@ -601,206 +601,201 @@
     finally{ ensureCutState(); }
   });
 
-  // ===== 書き出し =====
-  els.cut.addEventListener('click', async()=>{
-    log('書き出し開始…');
-    if(!Array.isArray(keepSegments) || keepSegments.length===0){ error('保持区間がありません。しきい値↓ / 最小無音長↓ で再計算してください。'); els.segList.scrollIntoView({behavior:'smooth'}); ensureCutState(); return; }
-    const file=els.file.files?.[0]; if(!file){ error('入力ファイルがありません。動画を選択→解析してください。'); ensureCutState(); return; }
+  // === 追加：プレビュー挙動で連続再生するヘルパー（録画用） ===
+  async function playSegmentsWithSkip(player, segments) {
+    if (!segments.length) return;
+    let idx = 0;
+    const dur = player.duration || (analysis?.duration ?? 0);
 
-    els.cut.disabled=true; els.recalc.disabled=true; els.analyze.disabled=true; els.prog.style.width='0%';
-    try{
-      await ensureFFmpeg();
-      const { fetchFile } = FFmpeg;
-      ffmpeg.FS('writeFile','input.mp4', await fetchFile(file));
+    return new Promise((resolve) => {
+      let rafId = 0;
+      let ended = false;
 
-      const chains=[]; const maps=[];
-      keepSegments.forEach((s,i)=>{ const st=s.start.toFixed(3), en=s.end.toFixed(3);
-        chains.push(`[0:v]trim=start=${st}:end=${en},setpts=PTS-STARTPTS[v${i}]`);
-        chains.push(`[0:a]atrim=start=${st}:end=${en},asetpts=PTS-STARTPTS[a${i}]`);
-        maps.push(`[v${i}][a${i}]`);
-      });
-      const filter = `${chains.join(';')};${maps.join('')}concat=n=${keepSegments.length}:v=1:a=1[v][a]`;
-      log(`filter_complex\n${filter}`);
-
-      const outName='out.mp4';
-      let saveName=(els.outNameInput.value||'cut_output.mp4').trim(); if(!/\.(mp4|mov|m4v)$/i.test(saveName)) saveName+='.mp4';
-
-      try{
-        await ffmpeg.run('-y','-i','input.mp4','-filter_complex',filter,'-map','[v]','-map','[a]','-c:v','libx264','-preset',els.preset.value,'-crf',String(els.crf.value),'-c:a','aac','-b:a',els.abitrate.value,'-movflags','+faststart', outName);
-      }catch(_){
-        log('一次失敗 → 映像のみで再試行');
-        const filterV = keepSegments.map((s,i)=>`[0:v]trim=start=${s.start.toFixed(3)}:end=${s.end.toFixed(3)},setpts=PTS-STARTPTS[v${i}]`).join(';') + `;${keepSegments.map((_,i)=>`[v${i}]`).join('')}concat=n=${keepSegments.length}:v=1:a=0[v]`;
-        await ffmpeg.run('-y','-i','input.mp4','-filter_complex',filterV,'-map','[v]','-c:v','libx264','-preset',els.preset.value,'-crf',String(els.crf.value),'-movflags','+faststart', outName);
+      function jumpTo(i) {
+        if (i >= segments.length) { stop(); return; }
+        const s = segments[i];
+        player.currentTime = Math.min(Math.max(0, s.start), dur || s.start + 0.001);
+        player.play().catch(()=>{});
       }
 
-      const data=ffmpeg.FS('readFile',outName); const blob=new Blob([data.buffer],{type:'video/mp4'});
+      function stop() {
+        if (ended) return;
+        ended = true;
+        cancelAnimationFrame(rafId);
+        player.pause();
+        resolve();
+      }
 
-      const url=URL.createObjectURL(blob); const sizeMB=(blob.size/1e6).toFixed(1);
-      els.outWrap.innerHTML=`<div class="ok">✅ 書き出し完了: ${sizeMB} MB</div>
-        <video controls style="width:100%;max-height:360px;margin-top:8px;border:1px solid #1e2a34;border-radius:10px" src="${url}"></video>
-        <div style="margin-top:8px"><a download="${saveName}" href="${url}"><button>ダウンロード</button></a> <button class="secondary" id="resetBtn">別の動画でやり直す</button></div>`;
-      document.getElementById('resetBtn')?.addEventListener('click',()=>location.reload());
-      log('完了');
-    }catch(e){ error(e?.message||e); }
-    finally{ ensureCutState(); els.recalc.disabled=false; els.analyze.disabled=false; }
-  });
-</script>
+      function tick() {
+        if (ended) return;
+        const t = player.currentTime;
+        const seg = segments[idx];
 
-  
-<script>
-  // ===== 書き出し（サイズ検査＋自動フォールバック付き） =====
+        if (!(t >= seg.start && t < seg.end)) {
+          if (t < seg.start) {
+            player.currentTime = seg.start;
+          } else {
+            idx++;
+            if (idx >= segments.length) { stop(); return; }
+            player.currentTime = segments[idx].start;
+          }
+        } else {
+          if (t >= seg.end) {
+            idx++;
+            if (idx >= segments.length) { stop(); return; }
+            player.currentTime = segments[idx].start;
+          }
+        }
+        rafId = requestAnimationFrame(tick);
+      }
+
+      jumpTo(0);
+      rafId = requestAnimationFrame(tick);
+    });
+  }
+
+  // === 追加：MediaRecorderで録画（MP4優先、なければWebM→ffmpegでMP4変換） ===
+  async function recordPreviewToMP4(player, segments, preferredName) {
+    const prevMuted = player.muted;
+    const prevVolume = player.volume;
+    player.muted = false;
+    player.volume = 0;
+
+    const stream = player.captureStream
+      ? player.captureStream()
+      : (player.mozCaptureStream ? player.mozCaptureStream() : null);
+    if (!stream) throw new Error('このブラウザは captureStream() をサポートしていません。');
+
+    const mp4Mime = 'video/mp4;codecs="avc1.42E01E,mp4a.40.2"';
+    const webmMimeVp9 = 'video/webm;codecs="vp9,opus"';
+    const webmMimeVp8 = 'video/webm;codecs="vp8,opus"';
+
+    let mimeType = '';
+    if ('MediaRecorder' in window && MediaRecorder.isTypeSupported(mp4Mime)) {
+      mimeType = mp4Mime;
+    } else if ('MediaRecorder' in window && MediaRecorder.isTypeSupported(webmMimeVp9)) {
+      mimeType = webmMimeVp9;
+    } else if ('MediaRecorder' in window && MediaRecorder.isTypeSupported(webmMimeVp8)) {
+      mimeType = webmMimeVp8;
+    } else {
+      throw new Error('このブラウザは MediaRecorder 録画（mp4/webm）に対応していません。');
+    }
+
+    const chunks = [];
+    const rec = new MediaRecorder(stream, { mimeType });
+    rec.ondataavailable = (e)=>{ if (e.data && e.data.size) chunks.push(e.data); };
+
+    const started = new Promise(res => rec.onstart = res);
+    const stopped = new Promise(res => rec.onstop = res);
+
+    rec.start(250);
+    await started;
+
+    await playSegmentsWithSkip(player, segments);
+
+    await new Promise(r=>setTimeout(r, 100));
+    rec.stop();
+    await stopped;
+
+    player.muted = prevMuted;
+    player.volume = prevVolume;
+
+    const recordedBlob = new Blob(chunks, { type: rec.mimeType });
+    if (rec.mimeType.startsWith('video/mp4')) {
+      return { blob: recordedBlob, name: ensureMp4Name(preferredName) };
+    }
+
+    await ensureFFmpeg();
+    const inputBytes = new Uint8Array(await recordedBlob.arrayBuffer());
+    FF_BASE && log(`[convert] WebM -> MP4 (base=${FF_BASE})`);
+
+    const inWbm = 'in.webm';
+    const outMp4 = 'rec_out.mp4';
+    ffmpeg.FS('writeFile', inWbm, inputBytes);
+
+    await ffmpeg.run(
+      '-y','-i', inWbm,
+      '-c:v','libx264','-pix_fmt','yuv420p','-preset','veryfast','-crf','22',
+      '-c:a','aac','-b:a','192k',
+      '-movflags','+faststart',
+      outMp4
+    );
+
+    const mp4Data = ffmpeg.FS('readFile', outMp4);
+    return { blob: new Blob([mp4Data], { type:'video/mp4' }), name: ensureMp4Name(preferredName) };
+  }
+
+  function ensureMp4Name(base){
+    let name = (base || els.outNameInput.value || 'cut_output.mp4').trim();
+    if (!/\.(mp4)$/i.test(name)) name += '.mp4';
+    return name;
+  }
+
+  async function saveBlobWithPickerOrDownload(blob, name){
+    try {
+      if ('showSaveFilePicker' in window) {
+        const handle = await window.showSaveFilePicker({
+          suggestedName: name,
+          types: [{ description: 'MP4 Video', accept: { 'video/mp4': ['.mp4'] } }]
+        });
+        const stream = await handle.createWritable();
+        await stream.write(blob);
+        await stream.close();
+        log(`ローカルに保存しました: ${handle.name}`);
+        return;
+      }
+    } catch(e) {
+      error('保存ダイアログが完了しませんでした。自動ダウンロードに切り替えます。');
+    }
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href=url; a.download=name;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(()=>URL.revokeObjectURL(url), 60000);
+
+    const sizeMB=(blob.size/1e6).toFixed(1);
+    els.outWrap.innerHTML = `
+      <div class="ok">✅ 書き出し完了: ${sizeMB} MB</div>
+      <video controls style="width:100%;max-height:360px;margin-top:8px;border:1px solid #1e2a34;border-radius:10px" src="${url}"></video>
+      <div style="margin-top:8px">
+        <a download="${name}" href="${url}"><button>もう一度ダウンロード</button></a>
+        <button class="secondary" id="resetBtn">別の動画でやり直す</button>
+      </div>`;
+    document.getElementById('resetBtn')?.addEventListener('click',()=>location.reload());
+  }
+
+  // ===== 「書き出し」：プレビューパスの“そのまま録画”でMP4保存 =====
   els.cut.addEventListener('click', async()=>{
-    log('書き出し開始…');
+    log('書き出し開始（プレビューパスの“そのまま録画”）…');
+
     if(!Array.isArray(keepSegments) || keepSegments.length===0){
       error('保持区間がありません。しきい値↓ / 最小無音長↓ で再計算してください。');
       els.segList.scrollIntoView({behavior:'smooth'});
-      ensureCutState();
       return;
     }
-    const file=els.file.files?.[0];
-    if(!file){
+    const f = els.file.files?.[0];
+    if(!f){
       error('入力ファイルがありません。動画を選択→解析してください。');
-      ensureCutState();
       return;
     }
 
-    els.cut.disabled=true; els.recalc.disabled=true; els.analyze.disabled=true; els.prog.style.width='0%';
-
-    // 小さい=失敗判定のしきい値（必要に応じて調整）
-    const TINY_BYTES = 50 * 1024;
-
-    // 便利関数: FSから読み出し→Blob→保存UI（SaveFilePicker優先/自動DLフォールバック）
-    async function presentAndMaybeSave(uint8, filename){
-      const blob = new Blob([uint8], { type:'video/mp4' });  // ← data.bufferではなくdata本体を使う
-      let saveName = (els.outNameInput.value || filename || 'cut_output.mp4').trim();
-      if(!/\.(mp4|mov|m4v)$/i.test(saveName)) saveName += '.mp4';
-
-      try{
-        if ('showSaveFilePicker' in window) {
-          const handle = await window.showSaveFilePicker({
-            suggestedName: saveName,
-            types: [{ description: 'MP4 Video', accept: { 'video/mp4': ['.mp4', '.m4v'] } }]
-          });
-          const stream = await handle.createWritable();
-          await stream.write(blob);
-          await stream.close();
-          log(`ローカルに保存しました: ${handle.name}`);
-        } else {
-          const url = URL.createObjectURL(blob);
-          const a = document.createElement('a');
-          a.href = url; a.download = saveName;
-          document.body.appendChild(a); a.click(); a.remove();
-          setTimeout(()=>URL.revokeObjectURL(url), 60_000);
-
-          const sizeMB=(blob.size/1e6).toFixed(1);
-          els.outWrap.innerHTML = `
-            <div class="ok">✅ 書き出し完了: ${sizeMB} MB</div>
-            <video controls style="width:100%;max-height:360px;margin-top:8px;border:1px solid #1e2a34;border-radius:10px" src="${url}"></video>
-            <div style="margin-top:8px">
-              <a download="${saveName}" href="${url}"><button>もう一度ダウンロード</button></a>
-              <button class="secondary" id="resetBtn">別の動画でやり直す</button>
-            </div>`;
-          document.getElementById('resetBtn')?.addEventListener('click',()=>location.reload());
-        }
-      }catch(e){
-        const url = URL.createObjectURL(blob);
-        const sizeMB=(blob.size/1e6).toFixed(1);
-        error('保存がキャンセル/失敗したため、手動ダウンロードを用意しました。');
-        els.outWrap.innerHTML = `
-          <div class="ok">✅ 書き出し完了: ${sizeMB} MB</div>
-          <video controls style="width:100%;max-height:360px;margin-top:8px;border:1px solid #1e2a34;border-radius:10px" src="${url}"></video>
-          <div style="margin-top:8px">
-            <a download="${saveName}" href="${url}"><button>ダウンロード</button></a>
-            <button class="secondary" id="resetBtn">別の動画でやり直す</button>
-          </div>`;
-        document.getElementById('resetBtn')?.addEventListener('click',()=>location.reload());
-        setTimeout(()=>URL.revokeObjectURL(url), 60_000);
-      }
-    }
+    els.cut.disabled = true; els.recalc.disabled = true; els.analyze.disabled = true; els.prog.style.width='0%';
 
     try{
-      await ensureFFmpeg();
-      const { fetchFile } = FFmpeg;
-      ffmpeg.FS('writeFile','input.mp4', await fetchFile(file));
-
-      // === 1) AV同時 concat 試行 ===
-      const chains=[]; const maps=[];
-      keepSegments.forEach((s,i)=>{
-        const st=s.start.toFixed(3), en=s.end.toFixed(3);
-        chains.push(`[0:v]trim=start=${st}:end=${en},setpts=PTS-STARTPTS[v${i}]`);
-        chains.push(`[0:a]atrim=start=${st}:end=${en},asetpts=PTS-STARTPTS[a${i}]`);
-        maps.push(`[v${i}][a${i}]`);
-      });
-      const filterAV = `${chains.join(';')};${maps.join('')}concat=n=${keepSegments.length}:v=1:a=1[v][a]`;
-      log(`filter_complex\n${filterAV}`);
-
-      const outName='out.mp4';
-
-      // 実行
-      let ok = false;
-      try{
-        await ffmpeg.run(
-          '-y','-i','input.mp4',
-          '-filter_complex', filterAV,'-map','[v]','-map','[a]',
-          '-c:v','libx264','-pix_fmt','yuv420p',
-          '-preset', els.preset.value, '-crf', String(els.crf.value),
-          '-c:a','aac','-b:a', els.abitrate.value,
-          '-movflags','+faststart',
-          outName
-        );
-        // サイズ検査
-        const stat = ffmpeg.FS('stat', outName);
-        if (stat.size > TINY_BYTES) {
-          ok = true;
-        } else {
-          log(`出力サイズが小さすぎます（${stat.size} bytes）→ フォールバックへ`);
-        }
-      }catch(e){
-        log('一次変換で例外 → フォールバックへ');
+      const { blob, name } = await recordPreviewToMP4(els.player, keepSegments, (els.outNameInput.value||'cut_output.mp4'));
+      if (!blob || blob.size < 2000) {
+        throw new Error(`録画結果が小さすぎます（${blob?.size||0} bytes）。ブラウザの録画制限/拡張機能の干渉/DRMの可能性。`);
       }
-
-      // === 2) フォールバック: 映像のみ concat ===
-      if (!ok) {
-        try{
-          const filterV =
-            keepSegments.map((s,i)=>`[0:v]trim=start=${s.start.toFixed(3)}:end=${s.end.toFixed(3)},setpts=PTS-STARTPTS[v${i}]`).join(';')
-            + `;${keepSegments.map((_,i)=>`[v${i}]`).join('')}concat=n=${keepSegments.length}:v=1:a=0[v]`;
-
-          log('[fallback] 映像のみで再試行');
-          await ffmpeg.run(
-            '-y','-i','input.mp4',
-            '-filter_complex', filterV, '-map','[v]',
-            '-c:v','libx264','-pix_fmt','yuv420p',
-            '-preset', els.preset.value, '-crf', String(els.crf.value),
-            '-movflags','+faststart',
-            outName
-          );
-          const stat2 = ffmpeg.FS('stat', outName);
-          if (stat2.size <= TINY_BYTES) {
-            throw new Error(`フォールバック後も出力が小さすぎます（${stat2.size} bytes）。入力がコーデック非対応/セグメントが極端に短い/メモリ不足の可能性。`);
-          }
-        }catch(e2){
-          error('[fallback] 失敗: ' + (e2?.message||e2));
-          // ログの末尾を見せる
-          log('\n--- 直近ログ（スクロール参照）---');
-          throw e2;
-        }
-      }
-
-      // === 3) 読み出して提示 ===
-      const data = ffmpeg.FS('readFile', outName); // Uint8Array
-      await presentAndMaybeSave(data, 'cut_output.mp4');
+      await saveBlobWithPickerOrDownload(blob, name);
       log('完了');
-
     }catch(e){
-      error(e?.message||e);
+      error(e?.message || e);
+      log('（ヒント）Chrome等で MP4 直録不可のときは、WebM録画→ffmpeg.wasmでMP4変換に自動切替します。');
     }finally{
-      ensureCutState();
-      els.recalc.disabled=false;
-      els.analyze.disabled=false;
+      els.recalc.disabled = false; els.analyze.disabled = false; els.cut.disabled = false;
     }
   });
 </script>
+
 
 
 </body>
