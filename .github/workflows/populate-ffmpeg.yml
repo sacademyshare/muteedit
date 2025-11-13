@@ -30,13 +30,14 @@ jobs:
 
           # --- UMD main ---
           UMD_PATH=$(tar -tzf "$FF_TGZ" | grep -E '(^|/)dist/umd/ffmpeg\.js$' | head -n1)
-          test -n "$UMD_PATH" || { echo "umd/ffmpeg.js not found in $FF_TGZ"; exit 1; }
+          test -n "$UMD_PATH" || { echo "dist/umd/ffmpeg.js not found in $FF_TGZ"; exit 1; }
           tar -xOf "$FF_TGZ" "$UMD_PATH" > assets/ffmpeg/ffmpeg.min.js
 
-          # --- UMD worker chunk required by the UMD build ---
-          WORKER814=$(tar -tzf "$FF_TGZ" | grep -E '(^|/)dist/umd/814\.ffmpeg\.js$' | head -n1)
-          test -n "$WORKER814" || { echo "dist/umd/814.ffmpeg.js not found in $FF_TGZ"; exit 1; }
-          tar -xOf "$FF_TGZ" "$WORKER814" > assets/ffmpeg/814.ffmpeg.js
+          # --- UMD が依存する 814 チャンク（0.12 系で使用される）---
+          WORKER814=$(tar -tzf "$FF_TGZ" | grep -E '(^|/)dist/umd/814\.ffmpeg\.js$' | head -n1 || true)
+          if [ -n "$WORKER814" ]; then
+            tar -xOf "$FF_TGZ" "$WORKER814" > assets/ffmpeg/814.ffmpeg.js
+          fi
 
           rm -f "$FF_TGZ"
 
@@ -45,7 +46,6 @@ jobs:
           echo "created: $CORE_TGZ"
           tar -tzf "$CORE_TGZ" | sed -n '1,200p'
 
-          # js / wasm は umd/ または esm/ のどちらかに入っているので末尾名で拾う
           COREJS_PATH=$(tar -tzf "$CORE_TGZ" | grep -E '(^|/)ffmpeg-core\.js$'   | head -n1)
           WASM_PATH=$(   tar -tzf "$CORE_TGZ" | grep -E '(^|/)ffmpeg-core\.wasm$' | head -n1)
 
@@ -58,7 +58,7 @@ jobs:
           tar -xOf "$CORE_TGZ" "$COREJS_PATH" > assets/ffmpeg/ffmpeg-core.js
           tar -xOf "$CORE_TGZ" "$WASM_PATH"   > assets/ffmpeg/ffmpeg-core.wasm
 
-          # worker は .js / .mjs / そもそもなし など揺れるため“あれば取得”
+          # worker は .js / .mjs / そもそも無し など揺れるため“あれば取得”
           set +o pipefail
           CORE_WORKER_PATH=$(tar -tzf "$CORE_TGZ" | grep -E '(^|/)ffmpeg-core\.worker\.(m)?js$' | head -n1 || true)
           set -o pipefail
@@ -75,16 +75,15 @@ jobs:
           echo "==> result"
           ls -lh assets/ffmpeg
 
-          # 0バイト防止（最低限チェック）
+          # 最低限サイズチェック
           test -s assets/ffmpeg/ffmpeg.min.js
-          test -s assets/ffmpeg/814.ffmpeg.js
           test -s assets/ffmpeg/ffmpeg-core.js
-          test -s assets/ffmpeg/ffmpeg-core.wasm
+          test -s assets/ffmpeg/ffmpeg-core.wasm || { echo "ffmpeg-core.wasm is empty"; exit 1; }
 
       - name: Commit files
         run: |
           git config user.name  "github-actions"
           git config user.email "github-actions@users.noreply.github.com"
           git add -A
-          git commit -m "Add ffmpeg runtime files for GitHub Pages (UMD + 814 chunk + core js/wasm)" || echo "No changes"
+          git commit -m "Add / update ffmpeg runtime files for GitHub Pages" || echo "No changes"
           git push
