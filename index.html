@@ -521,6 +521,28 @@
     .output-preview {
       margin-top: 10px;
     }
+
+    .hist-wrap {
+      margin-top: 8px;
+      padding: 6px 8px 8px;
+      border-radius: 10px;
+      background: rgba(4, 7, 12, 0.9);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+    }
+
+    .hist-title {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      font-size: 11px;
+      color: var(--muted);
+      margin-bottom: 4px;
+    }
+
+    .hist-legend {
+      font-size: 10px;
+      color: var(--muted);
+    }
   </style>
 </head>
 <body>
@@ -553,7 +575,7 @@
         </div>
 
         <h2 style="margin-top:10px;"><span class="step-tag">2</span> 無音判定のしきい値を調整</h2>
-        <p class="desc">動画ごとに音量が違うので、dBしきい値をスライダーで調整できます。</p>
+        <p class="desc">動画ごとに音量が違うので、dBしきい値をスライダー＆ヒストグラムで調整できます。</p>
 
         <div class="slider-group">
           <div class="slider-row">
@@ -573,6 +595,17 @@
           </div>
         </div>
 
+        <!-- 音量ヒストグラム -->
+        <div class="hist-wrap">
+          <div class="hist-title">
+            <span>音量ヒストグラム（50msごとの dB 分布）</span>
+            <span class="hist-legend">
+              緑＝しきい値以上（「声」とみなすゾーン） / グレー＝それ未満
+            </span>
+          </div>
+          <canvas id="histCanvas" width="400" height="120"></canvas>
+        </div>
+
         <div class="field-row" style="margin-top:10px;">
           <button id="analyzeButton" class="btn btn-secondary">
             <span class="btn-icon">🔍</span>
@@ -581,7 +614,7 @@
           <span class="pill">※ 初回解析時に音声をデコードします</span>
         </div>
 
-        <!-- ★ 追加: カット後プレビュー -->
+        <!-- カット後プレビュー -->
         <div class="field-row" style="margin-top:6px;">
           <button id="previewCutButton" class="btn btn-secondary" disabled>
             <span class="btn-icon">▶️</span>
@@ -680,6 +713,9 @@
 
     const logArea = document.getElementById('log');
 
+    const histCanvas = document.getElementById('histCanvas');
+    const histCtx = histCanvas.getContext('2d');
+
     // ========== 状態管理 ==========
     let selectedFile = null;
     let audioBuffer = null;
@@ -690,6 +726,12 @@
     // プレビュー用状態
     let previewPlaying = false;
     let previewSegmentIndex = 0;
+
+    // ヒストグラム状態
+    const HIST_MIN_DB = -80;
+    const HIST_MAX_DB = 0;
+    const HIST_BINS = 80;
+    let dbHistogram = null; // { bins: [], total, minDb, maxDb }
 
     // ========== ログ出力 ==========
     function log(message) {
@@ -710,8 +752,11 @@
     thresholdSlider.addEventListener('input', () => {
       updateSliderLabels();
       if (audioBuffer) {
-        stopPreview();  // スライダー変更時はプレビュー停止
+        stopPreview();
         runSegmentationOnly();
+      } else {
+        // 音声未解析でも、ヒストグラムがあればしきい値ラインだけ更新
+        renderHistogram(Number(thresholdSlider.value));
       }
     });
 
@@ -778,6 +823,8 @@
       selectedFile = file;
       audioBuffer = null;
       detectedSegments = [];
+      dbHistogram = null;
+      clearHistogram();
       stopPreview();
       analyzeStatus.textContent = '';
       analyzeStatus.classList.remove('warn', 'err');
@@ -895,6 +942,97 @@
       }
     }
 
+    // ========== ヒストグラム描画 ==========
+    function clearHistogram() {
+      if (!histCtx) return;
+      histCtx.clearRect(0, 0, histCanvas.width, histCanvas.height);
+      histCtx.fillStyle = '#05070a';
+      histCtx.fillRect(0, 0, histCanvas.width, histCanvas.height);
+      histCtx.fillStyle = 'rgba(255,255,255,0.08)';
+      histCtx.fillRect(0, histCanvas.height - 18, histCanvas.width, 1);
+    }
+
+    function renderHistogram(thresholdDb) {
+      if (!histCtx) return;
+      const w = histCanvas.width;
+      const h = histCanvas.height;
+
+      // 背景
+      histCtx.clearRect(0, 0, w, h);
+      histCtx.fillStyle = '#05070a';
+      histCtx.fillRect(0, 0, w, h);
+
+      // グリッド（目安線）
+      histCtx.strokeStyle = 'rgba(255,255,255,0.05)';
+      histCtx.lineWidth = 1;
+      histCtx.beginPath();
+      for (let i = 1; i <= 4; i++) {
+        const y = (h - 20) * (i / 4);
+        histCtx.moveTo(0, y);
+        histCtx.lineTo(w, y);
+      }
+      histCtx.stroke();
+
+      if (!dbHistogram || !dbHistogram.bins || dbHistogram.total <= 0) {
+        histCtx.fillStyle = 'rgba(255,255,255,0.3)';
+        histCtx.font = '10px system-ui';
+        histCtx.fillText('解析後に音量分布が表示されます', 8, h / 2);
+        return;
+      }
+
+      const bins = dbHistogram.bins;
+      const total = dbHistogram.total;
+      const maxCount = Math.max(...bins, 1);
+      const barAreaHeight = h - 20;
+      const dx = w / bins.length;
+
+      // 棒を描画（しきい値以上：緑、それ未満：グレー）
+      for (let i = 0; i < bins.length; i++) {
+        const count = bins[i];
+        if (count === 0) continue;
+        const ratio = count / maxCount;
+        const barH = ratio * (barAreaHeight * 0.95);
+
+        // このビンの中心 dB
+        const binCenterRatio = (i + 0.5) / bins.length;
+        const dbCenter = HIST_MIN_DB + binCenterRatio * (HIST_MAX_DB - HIST_MIN_DB);
+
+        if (dbCenter >= thresholdDb) {
+          histCtx.fillStyle = 'rgba(108, 225, 166, 0.9)'; // 緑
+        } else {
+          histCtx.fillStyle = 'rgba(255,255,255,0.25)';   // グレー
+        }
+
+        const x = i * dx;
+        const y = barAreaHeight - barH;
+        histCtx.fillRect(x, y, Math.max(1, dx - 0.5), barH);
+      }
+
+      // しきい値ライン
+      const tRatio = (thresholdDb - HIST_MIN_DB) / (HIST_MAX_DB - HIST_MIN_DB);
+      const tX = Math.max(0, Math.min(w, tRatio * w));
+
+      histCtx.strokeStyle = 'rgba(74,163,255,0.9)';
+      histCtx.lineWidth = 1.2;
+      histCtx.beginPath();
+      histCtx.moveTo(tX, 0);
+      histCtx.lineTo(tX, barAreaHeight + 2);
+      histCtx.stroke();
+
+      // しきい値ラベル
+      histCtx.fillStyle = 'rgba(74,163,255,0.95)';
+      histCtx.font = '10px system-ui';
+      const label = `${thresholdDb.toFixed(0)} dB`;
+      histCtx.fillText(label, Math.min(Math.max(2, tX + 4), w - 40), 10);
+
+      // x 軸（dB 目安）
+      histCtx.fillStyle = 'rgba(255,255,255,0.5)';
+      histCtx.font = '9px system-ui';
+      histCtx.fillText(`${HIST_MIN_DB} dB`, 4, h - 6);
+      const zeroX = w * ((0 - HIST_MIN_DB) / (HIST_MAX_DB - HIST_MIN_DB));
+      histCtx.fillText('0 dB', Math.min(w - 30, zeroX - 12), h - 6);
+    }
+
     // ========== 無音区間解析ロジック ==========
     function computeSegmentsFromAudioBuffer(buffer, thresholdDb, minVoiceSec, paddingSec) {
       const duration = buffer.duration;
@@ -905,6 +1043,8 @@
       const totalWindows = Math.floor(channelData.length / windowSize);
 
       const loudFlags = new Array(totalWindows);
+      const bins = new Array(HIST_BINS).fill(0);
+
       for (let i = 0; i < totalWindows; i++) {
         let sumSq = 0;
         const offset = i * windowSize;
@@ -913,9 +1053,27 @@
           sumSq += s * s;
         }
         const rms = Math.sqrt(sumSq / windowSize);
-        const db = rms <= 1e-8 ? -Infinity : 20 * Math.log10(rms);
+        let db = rms <= 1e-8 ? -Infinity : 20 * Math.log10(rms);
+
+        // ヒストグラム用にクランプ
+        if (!isFinite(db)) db = HIST_MIN_DB;
+        const clamped = Math.max(HIST_MIN_DB, Math.min(HIST_MAX_DB, db));
+        let r = (clamped - HIST_MIN_DB) / (HIST_MAX_DB - HIST_MIN_DB);
+        let idx = Math.floor(r * HIST_BINS);
+        if (idx < 0) idx = 0;
+        if (idx >= HIST_BINS) idx = HIST_BINS - 1;
+        bins[idx]++;
+
         loudFlags[i] = db >= thresholdDb;
       }
+
+      dbHistogram = {
+        bins,
+        total: totalWindows,
+        minDb: HIST_MIN_DB,
+        maxDb: HIST_MAX_DB
+      };
+      renderHistogram(thresholdDb);
 
       const segments = [];
       let inSegment = false;
@@ -1127,13 +1285,10 @@
       previewSegmentIndex = 0;
       previewCutButton.innerHTML = '<span class="btn-icon">⏹</span> プレビュー停止';
 
-      // 最初の区間へジャンプ
       const firstStart = detectedSegments[0].start;
       previewVideo.currentTime = Math.max(0, firstStart + 0.02);
-      previewVideo.muted = false; // 必要なら true に
-      previewVideo.play().catch(() => {
-        // 自動再生がブロックされた場合は何もしない
-      });
+      previewVideo.muted = false;
+      previewVideo.play().catch(() => {});
     }
 
     function stopPreview() {
@@ -1144,7 +1299,6 @@
       previewPlaying = false;
       previewSegmentIndex = 0;
       previewCutButton.innerHTML = '<span class="btn-icon">▶️</span> カット後のプレビュー再生';
-      // プレビュー停止時、動画自体は止めておく
       try { previewVideo.pause(); } catch (_) {}
     }
 
@@ -1157,7 +1311,6 @@
       }
     });
 
-    // timeupdate で「区間終端 → 次の区間」へジャンプ
     previewVideo.addEventListener('timeupdate', () => {
       if (!previewPlaying || !detectedSegments.length) return;
       const cur = previewVideo.currentTime;
@@ -1168,11 +1321,9 @@
       }
       const end = seg.end;
       if (cur >= end - 0.03) {
-        // 次の区間へ
         previewSegmentIndex++;
         const nextSeg = detectedSegments[previewSegmentIndex];
         if (!nextSeg) {
-          // 最後まで終わったら停止（ループさせたければここで 0 に戻す）
           stopPreview();
         } else {
           previewVideo.currentTime = Math.max(0, nextSeg.start + 0.02);
@@ -1180,16 +1331,14 @@
       }
     });
 
-    // ユーザーが動画を手で止めたらプレビューフラグだけ折る
     previewVideo.addEventListener('pause', () => {
       if (previewPlaying && previewVideo.seeking === false) {
-        // 手動停止っぽいときだけフラグを折る
         previewPlaying = false;
         previewCutButton.innerHTML = '<span class="btn-icon">▶️</span> カット後のプレビュー再生';
       }
     });
 
-    // ========== ffmpeg の filter_complex を生成 ==========
+    // ========== ffmpeg filter_complex 生成 ==========
     function buildFilterComplex(segments) {
       if (!segments.length) {
         throw new Error('書き出し対象の区間がありません。');
@@ -1295,6 +1444,9 @@
     exportButton.addEventListener('click', () => {
       exportVideo();
     });
+
+    // 初期ヒストグラムは空表示
+    clearHistogram();
   </script>
 </body>
 </html>
