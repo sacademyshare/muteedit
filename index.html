@@ -56,7 +56,7 @@
     }
 
     header {
-      padding: 18px 20px 16px;
+      padding: 14px 20px 16px;
       border-bottom: 1px solid rgba(255, 255, 255, 0.04);
       backdrop-filter: blur(12px);
       background: linear-gradient(
@@ -70,8 +70,24 @@
       z-index: 20;
     }
 
+    header .header-inner {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    header .logo {
+      max-width: 260px;
+    }
+
+    header .logo svg {
+      display: block;
+      width: 100%;
+      height: auto;
+    }
+
     h1 {
-      margin: 0 0 4px;
+      margin: 0 0 2px;
       font-size: 18px;
       letter-spacing: 0.03em;
       display: flex;
@@ -458,6 +474,7 @@
       background: rgba(255, 255, 255, 0.05);
       overflow: hidden;
       margin-top: 6px;
+      flex: 1;
     }
 
     .progress-bar-inner {
@@ -467,6 +484,20 @@
       transform: scaleX(0);
       background: linear-gradient(90deg, var(--accent), var(--accent-2));
       transition: transform 0.12s ease-out;
+    }
+
+    .progress-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 4px;
+    }
+
+    .progress-label {
+      font-size: 11px;
+      color: var(--muted);
+      min-width: 54px;
+      text-align: right;
     }
 
     .log-panel {
@@ -551,15 +582,72 @@
 </head>
 <body>
   <header>
-    <h1>
-      無音区間オートカット
-      <span class="badge">browser + ffmpeg.wasm</span>
-    </h1>
-    <p>話していない部分（指定dB未満）を自動検出し、まとめてカットした動画を書き出します。</p>
+    <div class="header-inner">
+      <!-- ロゴ -->
+      <div class="logo">
+        <svg version="1.1" xmlns="http://www.w3.org/2000/svg"
+             xmlns:xlink="http://www.w3.org/1999/xlink" x="0px" y="0px"
+             viewBox="0 0 266 44" style="enable-background:new 0 0 266 44;" xml:space="preserve">
+          <style type="text/css">
+            .st0{fill:#C0CD7D;}
+            .st1{fill:#8DC21F;}
+            .st2{fill:#1D412C;}
+            .st3{fill:#45855B;}
+            .st4{fill:#A9CD36;}
+            .st5{fill:#595757;}
+            .st6{fill:#006134;}
+          </style>
+          <g>
+            <g>
+              <polygon class="st0" points="26,16.6 9.7,16.6 22.8,26.2"/>
+            </g>
+            <polygon class="st1" points="46.7,43.5 38,16.6 32.6,14.7 27.2,16.6 18.4,43.5 32.6,33.4"/>
+            <polygon class="st0" points="46.7,43.5 38,16.6 32.6,14.7 32.6,33.4"/>
+            <polygon class="st2" points="32.6,14.7 38,16.6 32.6,0 27.2,16.6"/>
+            <polygon class="st3" points="32.6,14.7 38,16.6 32.6,0"/>
+            <g>
+              <polygon class="st4" points="55.4,16.6 39.2,16.6 42.3,26.2"/>
+            </g>
+          </g>
+          <g>
+            <polygon class="st5" points="192.3,5.2 189.7,5.2 189.4,9.7 192.1,9.7"/>
+            <polygon class="st5" points="196.4,5.3 193.8,5.3 193.6,9.7 196.2,9.7"/>
+          </g>
+          <polygon class="st5" points="257.9,21.2 256.6,21.2 256.3,21.2 254.6,21.2 231.2,21.2 230.9,26.2 256.3,26.2 256.3,26.2"/>
+          <path class="st5" d="M102.8,8.5l-1.6,4.9h23c-1.1,4.5-3.9,7.2-8.4,8.5c0.2-1.2,0.3-2.2,0.4-3.4l0.1-2.4h-5l-0.1,2.2
+            c-0.4,7.6-2.8,12-9.2,14.4l-0.2,0.1l-0.3,4.9l0.3-0.1c6.1-1.6,9.8-5,12.2-10.1c5.6-1,15-4.6,16.2-17.8l0.1-1.1
+            C130.2,8.5,105.3,8.5,102.8,8.5z"/>
+          <path class="st5" d="M147.8,12.7l0.3-5.5h-5.2l-0.3,5.5h-7.4l-1.5,4.8h8.7c-0.6,6.5-3.9,11.8-9.4,14.9l-0.1,0.1l-0.3,5.2l0.3-0.1
+            c8.2-2.9,13.5-10.2,14.6-20h9.2l-0.6,11.3c-0.1,2.6-1.1,3.5-3.7,3.5h-4.3l-1.6,4.8h6.6c5.4,0,8-2.5,8.3-8l0.9-16.4H147.8z"/>
+          <g>
+            <path class="st5" d="M168.8,17.4l-1.5,4.7h14.4c-1.1,5.7-5.6,9.4-12,10.4l-0.2,0l-0.3,4.9l0.3,0c6.8-0.9,15.7-4.3,17.8-15.4h10.3
+              l0.2-4.7H168.8z"/>
+            <polygon class="st5" points="187.9,11.2 188,8.5 171.9,8.5 170.5,12.9 170.4,13.3 196,13.3 196.1,11.2"/>
+          </g>
+          <g>
+            <path class="st5" d="M226.4,10.2c-7.2-0.9-15.5-1.3-23.2-1.5l-1.5,4.6c8.5,0.1,15.7,0.6,24.4,1.6L226.4,10.2z"/>
+            <path class="st5" d="M224.7,21.2c-7.2-1.1-13.8-1.4-20.2-1.6L203,24c7.4,0.2,13.8,0.7,21.4,1.8L224.7,21.2z"/>
+            <path class="st5" d="M201.2,30.5l-1.5,4.6c8.9,0.3,18,1.2,26.9,2.8l0.3-4.8C218.3,31.6,210,30.8,201.2,30.5z"/>
+          </g>
+          <path class="st6" d="M64.8,37.6l1.5-4.7h21.2c1-0.1,1.8-0.4,2.5-1.1c0.6-0.8,1-1.7,1-2.7c0-1-0.3-1.9-1-2.7
+            c-0.7-0.8-1.5-1.2-2.5-1.2H71.7c-1.9,0-3.5-0.8-4.9-2.4c-1.4-1.7-2.1-3.6-2.1-6c0-2.4,0.7-4.3,2.1-5.9c1.4-1.6,3-2.4,5-2.5h23.6
+            l-1.6,4.9H72.9c0,0-0.1,0-0.2,0c-0.6,0-1.4,0.2-2.2,1.1c-0.5,0.6-0.8,1.4-0.8,2.4c0,0.9,0.3,1.7,0.9,2.4c0.6,0.7,1.4,1.1,2.3,1.1
+            h15.3c2,0,3.6,0.8,5,2.4c1.5,1.7,2.2,3.7,2.2,6.2c0,2.5-0.7,4.5-2.2,6.2c-1.4,1.7-3.1,2.5-5.1,2.5L64.8,37.6L64.8,37.6z"/>
+        </svg>
+      </div>
+
+      <div>
+        <h1>
+          無音区間オートカット
+          <span class="badge">browser + ffmpeg.wasm</span>
+        </h1>
+        <p>話していない部分（指定dB未満）を自動検出し、まとめてカットした動画を書き出します。</p>
+      </div>
+    </div>
   </header>
 
   <main>
-    <!-- 左：動画選択・しきい値・解析結果 -->
+    <!-- 左：入力・解析 -->
     <section class="panel">
       <div class="panel-inner">
         <h2><span class="step-tag">1</span> 動画ファイルを選択</h2>
@@ -599,13 +687,11 @@
           </div>
         </div>
 
-        <!-- dB分布ヒストグラム（全ウィンドウ） -->
+        <!-- dB分布ヒストグラム -->
         <div class="hist-wrap">
           <div class="hist-title">
             <span>音量ヒストグラム（50msごとの dB 分布）</span>
-            <span class="hist-legend">
-              緑＝しきい値以上 / グレー＝しきい値未満
-            </span>
+            <span class="hist-legend">緑＝しきい値以上 / グレー＝しきい値未満</span>
           </div>
           <canvas id="histCanvas" width="400" height="120"></canvas>
         </div>
@@ -629,7 +715,6 @@
           <span class="pill">※ 初回解析時に音声をデコードします</span>
         </div>
 
-        <!-- カット後プレビュー -->
         <div class="field-row" style="margin-top:6px;">
           <button id="previewCutButton" class="btn btn-secondary" disabled>
             <span class="btn-icon">▶️</span>
@@ -651,7 +736,7 @@
       </div>
     </section>
 
-    <!-- 右：書き出し・進捗・ログ -->
+    <!-- 右：書き出し -->
     <section class="panel">
       <div class="panel-inner">
         <h2><span class="step-tag">4</span> 無音をカットして書き出し</h2>
@@ -665,8 +750,12 @@
           <span class="pill">※ 長い動画は数十秒～数分かかることがあります</span>
         </div>
 
-        <div class="progress-bar">
-          <div id="exportProgress" class="progress-bar-inner"></div>
+        <!-- 強化版プログレスバー -->
+        <div class="progress-row">
+          <div class="progress-bar">
+            <div id="exportProgress" class="progress-bar-inner"></div>
+          </div>
+          <div id="exportProgressLabel" class="progress-label">0%</div>
         </div>
 
         <div id="exportStatus" class="status-text"></div>
@@ -699,7 +788,7 @@
   </main>
 
   <script>
-    // ========== DOM 取得 ==========
+    // DOM取得
     const fileInput = document.getElementById('fileInput');
     const fileInfo = document.getElementById('fileInfo');
     const previewVideo = document.getElementById('previewVideo');
@@ -723,6 +812,7 @@
     const exportButton = document.getElementById('exportButton');
     const exportStatus = document.getElementById('exportStatus');
     const exportProgress = document.getElementById('exportProgress');
+    const exportProgressLabel = document.getElementById('exportProgressLabel');
     const downloadLink = document.getElementById('downloadLink');
     const outputVideo = document.getElementById('outputVideo');
 
@@ -734,59 +824,54 @@
     const timelineCanvas = document.getElementById('timelineCanvas');
     const timelineCtx = timelineCanvas.getContext('2d');
 
-    // ========== 状態管理 ==========
+    // 状態
     let selectedFile = null;
     let audioBuffer = null;
     let detectedSegments = [];
     let ffmpeg = null;
     let ffmpegLoaded = false;
 
-    // プレビュー状態
     let previewPlaying = false;
     let previewSegmentIndex = 0;
 
-    // タイムライン用
-    let windowRms = null;    // 各 50ms ウィンドウの RMS
-    let windowFlags = null;  // true = loud(keep), false = quiet(cut)
+    let windowRms = null;
+    let windowFlags = null;
     let windowDuration = 0.05;
 
-    // dBヒストグラム
     const HIST_MIN_DB = -80;
     const HIST_MAX_DB = 0;
     const HIST_BINS = 80;
-    let dbHistogram = null; // {totalBins, countWindows}
+    let dbHistogram = null;
 
-    // クリック位置マーカー（秒）
     let clickMarkerTime = null;
 
-    // ========== ログ ==========
+    let isExportRunning = false;
+
+    // ログ
     function log(message) {
       const time = new Date().toISOString().split('T')[1].replace('Z', '');
       logArea.value += `[${time}] ${message}\n`;
       logArea.scrollTop = logArea.scrollHeight;
     }
 
-    // ========== スライダー表示更新 ==========
+    // スライダー表示
     function updateSliderLabels() {
       thresholdLabel.textContent = `${thresholdSlider.value} dB`;
       minVoiceLabel.textContent = `${Number(minVoiceSlider.value).toFixed(1)} 秒`;
       paddingLabel.textContent = `${Number(paddingSlider.value).toFixed(2)} 秒`;
     }
-
     updateSliderLabels();
 
     thresholdSlider.addEventListener('input', () => {
       updateSliderLabels();
-      const t = Number(thresholdSlider.value);
       if (audioBuffer) {
         stopPreview();
         runSegmentationOnly();
       } else {
-        renderHistogram(t);
+        renderHistogram(Number(thresholdSlider.value));
         renderTimeline();
       }
     });
-
     minVoiceSlider.addEventListener('input', () => {
       updateSliderLabels();
       if (audioBuffer) {
@@ -794,7 +879,6 @@
         runSegmentationOnly();
       }
     });
-
     paddingSlider.addEventListener('input', () => {
       updateSliderLabels();
       if (audioBuffer) {
@@ -803,7 +887,7 @@
       }
     });
 
-    // ========== ffmpeg.wasm 初期化 ==========
+    // ffmpeg 初期化
     function initFFmpegInstance() {
       if (ffmpeg) return ffmpeg;
       const { createFFmpeg, fetchFile } = FFmpeg;
@@ -812,9 +896,14 @@
         corePath: 'https://unpkg.com/@ffmpeg/core-st@0.11.1/dist/ffmpeg-core.js',
         mainName: 'main',
         progress: (p) => {
-          if (p && typeof p.ratio === 'number') {
-            const ratio = Math.max(0, Math.min(1, p.ratio));
-            exportProgress.style.transform = `scaleX(${ratio})`;
+          if (!p || typeof p.ratio !== 'number') return;
+          const r = Math.max(0, Math.min(1, p.ratio));
+          exportProgress.style.transform = `scaleX(${r})`;
+          if (isExportRunning) {
+            exportProgressLabel.textContent = `${Math.round(r * 100)}%`;
+            if (r < 1) {
+              exportStatus.textContent = `書き出し中… ${Math.round(r * 100)}%`;
+            }
           }
         }
       });
@@ -826,7 +915,7 @@
       initFFmpegInstance();
       if (!ffmpegLoaded) {
         log('ffmpeg-core をロード中…');
-        exportStatus.textContent = 'ffmpeg-core をロードしています…（初回のみ数十秒かかる場合があります）';
+        exportStatus.textContent = 'ffmpeg-core をロードしています…（初回のみ数十秒かかることがあります）';
         try {
           await ffmpeg.load();
           ffmpegLoaded = true;
@@ -840,7 +929,7 @@
       }
     }
 
-    // ========== ファイル選択 ==========
+    // ファイル選択
     fileInput.addEventListener('change', () => {
       const file = fileInput.files && fileInput.files[0];
       if (!file) return;
@@ -865,6 +954,7 @@
       exportStatus.textContent = '';
       exportStatus.classList.remove('warn', 'err');
       exportProgress.style.transform = 'scaleX(0)';
+      exportProgressLabel.textContent = '0%';
       downloadLink.style.display = 'none';
       outputVideo.style.display = 'none';
       outputVideo.removeAttribute('src');
@@ -879,7 +969,7 @@
       log(`動画ファイル選択: ${file.name} (${sizeMB}MB)`);
     });
 
-    // ========== Audio デコード ==========
+    // 音声デコード
     async function decodeAudioIfNeeded() {
       if (audioBuffer) return audioBuffer;
       if (!selectedFile) throw new Error('先に動画ファイルを選択してください。');
@@ -912,7 +1002,7 @@
         log('AudioContext が利用できません。直接 ffmpeg.wasm にフォールバックします。');
       }
 
-      // ffmpeg フォールバック（同じく mono 48kHz）
+      // ffmpeg フォールバック
       analyzeStatus.textContent = 'ffmpeg で音声トラックを抽出中…';
       log('ffmpeg で mono 48kHz PCM を生成開始');
 
@@ -965,7 +1055,7 @@
       }
     }
 
-    // ========== ヒストグラム & タイムライン ==========
+    // ヒストグラム / タイムライン描画
     function clearHistogram() {
       if (!histCtx) return;
       const w = histCanvas.width;
@@ -999,7 +1089,6 @@
       histCtx.fillStyle = '#05070a';
       histCtx.fillRect(0, 0, w, h);
 
-      // グリッド
       histCtx.strokeStyle = 'rgba(255,255,255,0.05)';
       histCtx.lineWidth = 1;
       histCtx.beginPath();
@@ -1042,7 +1131,6 @@
         histCtx.fillRect(x, y, Math.max(1, dx - 0.5), barH);
       }
 
-      // しきい値ライン
       const tRatio = (thresholdDb - HIST_MIN_DB) / (HIST_MAX_DB - HIST_MIN_DB);
       const tX = Math.max(0, Math.min(w, tRatio * w));
 
@@ -1085,20 +1173,17 @@
       const maxRms = Math.max(...windowRms, 1e-6);
       const dx = w / N;
 
-      // 各X帯を全面塗りつぶす（カット/残す＋音量に応じた濃さ）
       for (let i = 0; i < N; i++) {
         const rms = windowRms[i];
-        const amp = rms / maxRms; // 0〜1
+        const amp = rms / maxRms;
         const loud = windowFlags[i];
 
         let alphaBase, alpha;
         if (loud) {
-          // 残す区間：緑、音量が大きいほど濃く
           alphaBase = 0.25;
           alpha = alphaBase + amp * 0.55;
           timelineCtx.fillStyle = `rgba(108,225,166,${alpha.toFixed(3)})`;
         } else {
-          // カット区間：薄いグレー
           alphaBase = 0.05;
           alpha = alphaBase + amp * 0.35;
           timelineCtx.fillStyle = `rgba(255,255,255,${alpha.toFixed(3)})`;
@@ -1109,7 +1194,6 @@
         timelineCtx.fillRect(x, 0, barW, h);
       }
 
-      // 0s / total ラベル
       const dur = audioBuffer.duration;
       timelineCtx.fillStyle = 'rgba(255,255,255,0.7)';
       timelineCtx.font = '9px system-ui';
@@ -1117,11 +1201,11 @@
       const label = dur.toFixed(1) + 's';
       timelineCtx.fillText(label, w - 40, h - 4);
 
-      // 再生位置マーカー（白）
+      // 再生位置
       if (!isNaN(previewVideo.currentTime) && dur > 0) {
         const playRatio = Math.max(0, Math.min(1, previewVideo.currentTime / dur));
         const playX = playRatio * w;
-        timelineCtx.strokeStyle = 'rgba(255,255,255,0.9)';
+        timelineCtx.strokeStyle = 'rgba(255,255,255,0.95)';
         timelineCtx.lineWidth = 1.5;
         timelineCtx.beginPath();
         timelineCtx.moveTo(playX, 0);
@@ -1129,7 +1213,7 @@
         timelineCtx.stroke();
       }
 
-      // クリック位置マーカー（黄色）
+      // クリック位置
       if (clickMarkerTime != null && dur > 0) {
         const clickRatio = Math.max(0, Math.min(1, clickMarkerTime / dur));
         const clickX = clickRatio * w;
@@ -1144,7 +1228,7 @@
       }
     }
 
-    // ========== 無音区間解析 ==========
+    // 無音区間解析
     function computeSegmentsFromAudioBuffer(buffer, thresholdDb, minVoiceSec, paddingSec) {
       const duration = buffer.duration;
       const sampleRate = buffer.sampleRate;
@@ -1193,7 +1277,6 @@
       renderHistogram(thresholdDb);
       renderTimeline();
 
-      // loudFlags から連続区間へ
       const segments = [];
       let inSegment = false;
       let segStart = 0;
@@ -1396,7 +1479,7 @@
       runFullAnalysis();
     });
 
-    // ========== カット後プレビュー ==========
+    // プレビュー制御
     function startPreview() {
       if (!detectedSegments.length || !previewVideo.src) return;
       previewPlaying = true;
@@ -1418,6 +1501,7 @@
       previewSegmentIndex = 0;
       previewCutButton.innerHTML = '<span class="btn-icon">▶️</span> カット後のプレビュー再生';
       try { previewVideo.pause(); } catch (_) {}
+      renderTimeline();
     }
 
     previewCutButton.addEventListener('click', () => {
@@ -1431,7 +1515,7 @@
 
     previewVideo.addEventListener('timeupdate', () => {
       if (audioBuffer && windowRms) {
-        renderTimeline(); // 再生位置マーカー更新
+        renderTimeline();
       }
 
       if (!previewPlaying || !detectedSegments.length) return;
@@ -1461,7 +1545,7 @@
       }
     });
 
-    // ========== タイムラインクリックでジャンプ ==========
+    // タイムラインクリック
     timelineCanvas.addEventListener('click', (e) => {
       if (!audioBuffer || !windowRms) return;
       const rect = timelineCanvas.getBoundingClientRect();
@@ -1469,7 +1553,7 @@
       const ratio = Math.max(0, Math.min(1, x / timelineCanvas.width));
       const targetTime = ratio * audioBuffer.duration;
 
-      clickMarkerTime = targetTime; // マーカー更新
+      clickMarkerTime = targetTime;
 
       if (!detectedSegments.length) {
         previewVideo.currentTime = targetTime;
@@ -1479,7 +1563,6 @@
       }
 
       if (previewPlaying) {
-        // カットプレビュー中：クリック位置以降の最初の発話区間へ
         let idx = detectedSegments.findIndex(seg => seg.end > targetTime);
         if (idx === -1) {
           stopPreview();
@@ -1491,14 +1574,13 @@
         previewVideo.currentTime = Math.max(0, start + 0.02);
         previewVideo.play().catch(() => {});
       } else {
-        // 通常：その時間へジャンプ
         previewVideo.currentTime = targetTime;
         previewVideo.play().catch(() => {});
       }
       renderTimeline();
     });
 
-    // ========== ffmpeg filter_complex 生成 ==========
+    // filter_complex 生成
     function buildFilterComplex(segments) {
       if (!segments.length) {
         throw new Error('書き出し対象の区間がありません。');
@@ -1522,7 +1604,7 @@
       return filter;
     }
 
-    // ========== 書き出し ==========
+    // 書き出し
     async function exportVideo() {
       if (!selectedFile) {
         alert('先に動画ファイルを選択してください。');
@@ -1536,9 +1618,11 @@
       stopPreview();
 
       exportButton.disabled = true;
-      exportStatus.classList.remove('warn', 'err');
-      exportStatus.textContent = 'ffmpeg で書き出し中…';
+      isExportRunning = true;
       exportProgress.style.transform = 'scaleX(0)';
+      exportProgressLabel.textContent = '0%';
+      exportStatus.textContent = '書き出し準備中…';
+      exportStatus.classList.remove('warn', 'err');
       downloadLink.style.display = 'none';
       outputVideo.style.display = 'none';
       outputVideo.removeAttribute('src');
@@ -1556,7 +1640,7 @@
 
         const filterComplex = buildFilterComplex(detectedSegments);
 
-        exportStatus.textContent = '再エンコード処理中…（ブラウザを閉じないでください）';
+        exportStatus.textContent = '再エンコード処理中… 0%';
         log(`ffmpeg.run -i ${inputName} ...`);
 
         await ffmpeg.run(
@@ -1568,6 +1652,9 @@
           '-movflags', '+faststart',
           outputName
         );
+
+        exportProgress.style.transform = 'scaleX(1)';
+        exportProgressLabel.textContent = '100%';
 
         log('ffmpeg 出力読み込み');
         const data = ffmpeg.FS('readFile', outputName);
@@ -1596,6 +1683,7 @@
           const inputExt = (selectedFile.name.split('.').pop() || 'mp4').toLowerCase();
           ffmpeg.FS('unlink', `input.${inputExt}`);
         } catch (_) {}
+        isExportRunning = false;
         exportButton.disabled = false;
       }
     }
