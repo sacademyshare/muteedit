@@ -543,6 +543,10 @@
       font-size: 10px;
       color: var(--muted);
     }
+
+    canvas#timelineCanvas {
+      cursor: pointer;
+    }
   </style>
 </head>
 <body>
@@ -575,7 +579,7 @@
         </div>
 
         <h2 style="margin-top:10px;"><span class="step-tag">2</span> 無音判定のしきい値を調整</h2>
-        <p class="desc">動画ごとに音量が違うので、dBヒストグラムとタイムラインを見ながら調整できます。</p>
+        <p class="desc">動画ごとに音量が違うので、dBヒストグラムと波形タイムラインを見ながら調整できます。</p>
 
         <div class="slider-group">
           <div class="slider-row">
@@ -595,7 +599,7 @@
           </div>
         </div>
 
-        <!-- dB分布ヒストグラム -->
+        <!-- dB分布ヒストグラム（全ウィンドウ） -->
         <div class="hist-wrap">
           <div class="hist-title">
             <span>音量ヒストグラム（50msごとの dB 分布）</span>
@@ -606,15 +610,15 @@
           <canvas id="histCanvas" width="400" height="120"></canvas>
         </div>
 
-        <!-- カットタイムライン -->
+        <!-- 波形タイムライン -->
         <div class="hist-wrap" style="margin-top:6px;">
           <div class="hist-title">
-            <span>カットタイムライン（動画全体）</span>
+            <span>カットタイムライン（波形表示 / クリックでジャンプ）</span>
             <span class="hist-legend">
-              緑＝残す区間 / 灰色＝カットされる区間
+              緑＝残す区間 / 灰色＝カットされる区間（時間軸）
             </span>
           </div>
-          <canvas id="timelineCanvas" width="400" height="60"></canvas>
+          <canvas id="timelineCanvas" width="400" height="70"></canvas>
         </div>
 
         <div class="field-row" style="margin-top:10px;">
@@ -741,15 +745,16 @@
     let previewPlaying = false;
     let previewSegmentIndex = 0;
 
-    // ヒストグラム状態（dB分布）
+    // RMS & flags per window（タイムライン波形用）
+    let windowRms = null;
+    let windowFlags = null; // true = loud(keep), false = quiet(cut)
+    let windowDuration = 0.05; // 50ms
+
+    // dBヒストグラム状態
     const HIST_MIN_DB = -80;
     const HIST_MAX_DB = 0;
     const HIST_BINS = 80;
-    let dbHistogram = null;
-
-    // タイムライン用（各ウィンドウの loud/quiet）
-    let lastWindowFlags = null;
-    let lastWindowDuration = 0.05; // 50ms
+    let dbHistogram = null; // {totalBins, countWindows}
 
     // ========== ログ出力 ==========
     function log(message) {
@@ -774,8 +779,8 @@
         stopPreview();
         runSegmentationOnly();
       } else {
-        // 音声未解析の場合はヒストグラムのしきい値線だけ更新
         renderHistogram(t);
+        renderTimeline();
       }
     });
 
@@ -843,7 +848,8 @@
       audioBuffer = null;
       detectedSegments = [];
       dbHistogram = null;
-      lastWindowFlags = null;
+      windowRms = null;
+      windowFlags = null;
       clearHistogram();
       clearTimeline();
 
@@ -964,7 +970,7 @@
       }
     }
 
-    // ========== ヒストグラム描画 / タイムライン描画 ==========
+    // ========== ヒストグラム & タイムライン描画 ==========
     function clearHistogram() {
       if (!histCtx) return;
       const w = histCanvas.width;
@@ -977,12 +983,23 @@
       histCtx.fillText('解析後に音量分布が表示されます', 8, h / 2);
     }
 
+    function clearTimeline() {
+      if (!timelineCtx) return;
+      const w = timelineCanvas.width;
+      const h = timelineCanvas.height;
+      timelineCtx.clearRect(0, 0, w, h);
+      timelineCtx.fillStyle = '#05070a';
+      timelineCtx.fillRect(0, 0, w, h);
+      timelineCtx.fillStyle = 'rgba(255,255,255,0.3)';
+      timelineCtx.font = '10px system-ui';
+      timelineCtx.fillText('解析後に波形タイムラインが表示されます', 8, h / 2);
+    }
+
     function renderHistogram(thresholdDb) {
       if (!histCtx) return;
       const w = histCanvas.width;
       const h = histCanvas.height;
 
-      // 背景
       histCtx.clearRect(0, 0, w, h);
       histCtx.fillStyle = '#05070a';
       histCtx.fillRect(0, 0, w, h);
@@ -998,26 +1015,25 @@
       }
       histCtx.stroke();
 
-      if (!dbHistogram || !dbHistogram.bins || dbHistogram.total <= 0) {
+      if (!dbHistogram || !dbHistogram.totalBins || dbHistogram.countWindows <= 0) {
         histCtx.fillStyle = 'rgba(255,255,255,0.3)';
         histCtx.font = '10px system-ui';
         histCtx.fillText('解析後に音量分布が表示されます', 8, h / 2);
         return;
       }
 
-      const bins = dbHistogram.bins;
-      const maxCount = Math.max(...bins, 1);
+      const totalBins = dbHistogram.totalBins;
+      const maxCount = Math.max(...totalBins, 1);
       const barAreaHeight = h - 20;
-      const dx = w / bins.length;
+      const dx = w / totalBins.length;
 
-      // 棒
-      for (let i = 0; i < bins.length; i++) {
-        const count = bins[i];
+      for (let i = 0; i < totalBins.length; i++) {
+        const count = totalBins[i];
         if (count === 0) continue;
         const ratio = count / maxCount;
         const barH = ratio * (barAreaHeight * 0.95);
 
-        const binCenterRatio = (i + 0.5) / bins.length;
+        const binCenterRatio = (i + 0.5) / totalBins.length;
         const dbCenter = HIST_MIN_DB + binCenterRatio * (HIST_MAX_DB - HIST_MIN_DB);
 
         if (dbCenter >= thresholdDb) {
@@ -1054,50 +1070,54 @@
       histCtx.fillText('0 dB', Math.min(w - 30, zeroX - 12), h - 6);
     }
 
-    function clearTimeline() {
-      if (!timelineCtx) return;
-      const w = timelineCanvas.width;
-      const h = timelineCanvas.height;
-      timelineCtx.clearRect(0, 0, w, h);
-      timelineCtx.fillStyle = '#05070a';
-      timelineCtx.fillRect(0, 0, w, h);
-      timelineCtx.fillStyle = 'rgba(255,255,255,0.3)';
-      timelineCtx.font = '10px system-ui';
-      timelineCtx.fillText('解析後にカット位置が表示されます', 8, h / 2);
-    }
-
     function renderTimeline() {
       if (!timelineCtx) return;
       const w = timelineCanvas.width;
       const h = timelineCanvas.height;
+
       timelineCtx.clearRect(0, 0, w, h);
       timelineCtx.fillStyle = '#05070a';
       timelineCtx.fillRect(0, 0, w, h);
 
-      if (!audioBuffer || !lastWindowFlags || !lastWindowFlags.length) {
+      if (!audioBuffer || !windowRms || !windowFlags || !windowRms.length) {
         timelineCtx.fillStyle = 'rgba(255,255,255,0.3)';
         timelineCtx.font = '10px system-ui';
-        timelineCtx.fillText('解析後にカット位置が表示されます', 8, h / 2);
+        timelineCtx.fillText('解析後に波形タイムラインが表示されます', 8, h / 2);
         return;
       }
 
-      const N = lastWindowFlags.length;
-      const dur = audioBuffer.duration;
+      const N = windowRms.length;
+      const midY = h / 2;
+      const maxRms = Math.max(...windowRms, 1e-6);
+      const usableHeight = h * 0.45; // 上下方向の最大振幅
 
-      // ベース：カット区間（灰色）
-      timelineCtx.fillStyle = 'rgba(255,255,255,0.18)';
-      timelineCtx.fillRect(0, h * 0.25, w, h * 0.5);
+      const dx = w / N;
 
-      // 残す区間（緑）
-      timelineCtx.fillStyle = 'rgba(108,225,166,0.9)';
+      // ベースライン
+      timelineCtx.strokeStyle = 'rgba(255,255,255,0.15)';
+      timelineCtx.lineWidth = 1;
+      timelineCtx.beginPath();
+      timelineCtx.moveTo(0, midY);
+      timelineCtx.lineTo(w, midY);
+      timelineCtx.stroke();
+
       for (let i = 0; i < N; i++) {
-        if (!lastWindowFlags[i]) continue; // quiet => base色のまま
-        const x = Math.floor(i * w / N);
-        const barW = Math.max(1, Math.ceil(w / N));
-        timelineCtx.fillRect(x, h * 0.2, barW, h * 0.6);
+        const rms = windowRms[i];
+        const amp = rms / maxRms; // 0〜1
+        const barH = amp * usableHeight;
+        const x = i * dx;
+        const barW = Math.max(1, dx - 0.5);
+
+        const loud = windowFlags[i];
+        timelineCtx.fillStyle = loud
+          ? 'rgba(108,225,166,0.9)'   // keep
+          : 'rgba(255,255,255,0.25)'; // cut
+
+        timelineCtx.fillRect(x, midY - barH, barW, barH * 2);
       }
 
-      // 0s / total のラベル
+      // 時間ラベル
+      const dur = audioBuffer.duration;
       timelineCtx.fillStyle = 'rgba(255,255,255,0.6)';
       timelineCtx.font = '9px system-ui';
       timelineCtx.fillText('0s', 4, h - 4);
@@ -1110,56 +1130,62 @@
       const duration = buffer.duration;
       const sampleRate = buffer.sampleRate;
       const channelData = buffer.getChannelData(0);
-      const windowDuration = 0.05; // 50ms
-      const windowSize = Math.floor(sampleRate * windowDuration);
-      const totalWindows = Math.floor(channelData.length / windowSize);
+
+      const winDur = 0.05; // 50ms
+      const winSize = Math.floor(sampleRate * winDur);
+      const totalWindows = Math.floor(channelData.length / winSize);
 
       const loudFlags = new Array(totalWindows);
-      const bins = new Array(HIST_BINS).fill(0);
+      const rmsArr = new Array(totalWindows);
+      const totalBins = new Array(HIST_BINS).fill(0);
 
       for (let i = 0; i < totalWindows; i++) {
         let sumSq = 0;
-        const offset = i * windowSize;
-        for (let j = 0; j < windowSize; j++) {
+        const offset = i * winSize;
+        for (let j = 0; j < winSize; j++) {
           const s = channelData[offset + j];
           sumSq += s * s;
         }
-        const rms = Math.sqrt(sumSq / windowSize);
-        let db = rms <= 1e-8 ? -Infinity : 20 * Math.log10(rms);
+        const rms = Math.sqrt(sumSq / winSize);
+        rmsArr[i] = rms;
 
+        let db = rms <= 1e-8 ? -Infinity : 20 * Math.log10(rms);
         if (!isFinite(db)) db = HIST_MIN_DB;
         const clamped = Math.max(HIST_MIN_DB, Math.min(HIST_MAX_DB, db));
         let r = (clamped - HIST_MIN_DB) / (HIST_MAX_DB - HIST_MIN_DB);
         let idx = Math.floor(r * HIST_BINS);
         if (idx < 0) idx = 0;
         if (idx >= HIST_BINS) idx = HIST_BINS - 1;
-        bins[idx]++;
 
-        loudFlags[i] = db >= thresholdDb;
+        totalBins[idx]++;
+
+        const isLoud = db >= thresholdDb;
+        loudFlags[i] = isLoud;
       }
 
+      windowRms = rmsArr;
+      windowFlags = loudFlags;
+      windowDuration = winDur;
+
       dbHistogram = {
-        bins,
-        total: totalWindows,
-        minDb: HIST_MIN_DB,
-        maxDb: HIST_MAX_DB
+        totalBins,
+        countWindows: totalWindows
       };
-      lastWindowFlags = loudFlags;
-      lastWindowDuration = windowDuration;
 
       renderHistogram(thresholdDb);
       renderTimeline();
 
+      // loudFlags から連続区間を抽出
       const segments = [];
       let inSegment = false;
       let segStart = 0;
       for (let i = 0; i < totalWindows; i++) {
-        const t = i * windowDuration;
+        const t = i * winDur;
         if (loudFlags[i] && !inSegment) {
           inSegment = true;
           segStart = t;
         } else if (!loudFlags[i] && inSegment) {
-          const segEnd = i * windowDuration;
+          const segEnd = i * winDur;
           if (segEnd - segStart >= minVoiceSec) {
             segments.push({ start: segStart, end: segEnd });
           }
@@ -1167,12 +1193,13 @@
         }
       }
       if (inSegment) {
-        const segEnd = totalWindows * windowDuration;
+        const segEnd = totalWindows * winDur;
         if (segEnd - segStart >= minVoiceSec) {
           segments.push({ start: segStart, end: segEnd });
         }
       }
 
+      // パディング & マージ
       const padded = segments.map(seg => ({
         start: Math.max(0, seg.start - paddingSec),
         end: Math.min(duration, seg.end + paddingSec)
@@ -1413,6 +1440,39 @@
       }
     });
 
+    // ========== タイムラインクリックでジャンプ ==========
+    timelineCanvas.addEventListener('click', (e) => {
+      if (!audioBuffer || !windowRms) return;
+      const rect = timelineCanvas.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const ratio = Math.max(0, Math.min(1, x / timelineCanvas.width));
+      const targetTime = ratio * audioBuffer.duration;
+
+      if (!detectedSegments.length) {
+        // まだカット情報がない場合は、そのままジャンプ
+        previewVideo.currentTime = targetTime;
+        previewVideo.play().catch(() => {});
+        return;
+      }
+
+      if (previewPlaying) {
+        // カットプレビューモード中：クリック位置以降で最初の発話区間へ飛ぶ
+        let idx = detectedSegments.findIndex(seg => seg.end > targetTime);
+        if (idx === -1) {
+          stopPreview();
+          return;
+        }
+        previewSegmentIndex = idx;
+        const start = detectedSegments[idx].start;
+        previewVideo.currentTime = Math.max(0, start + 0.02);
+        previewVideo.play().catch(() => {});
+      } else {
+        // 通常：その時間にジャンプしてそのまま再生
+        previewVideo.currentTime = targetTime;
+        previewVideo.play().catch(() => {});
+      }
+    });
+
     // ========== ffmpeg filter_complex 生成 ==========
     function buildFilterComplex(segments) {
       if (!segments.length) {
@@ -1520,7 +1580,7 @@
       exportVideo();
     });
 
-    // 初期描画
+    // 初期表示
     clearHistogram();
     clearTimeline();
   </script>
