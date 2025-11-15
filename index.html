@@ -568,4 +568,733 @@
           </div>
           <div class="slider-row">
             <div class="slider-label">前後の余白</div>
-            <div class="slider-value" id=
+            <div class="slider-value" id="paddingLabel">0.2 秒</div>
+            <input id="paddingSlider" type="range" min="0" max="1" value="0.2" step="0.05" />
+          </div>
+        </div>
+
+        <div class="field-row" style="margin-top:10px;">
+          <button id="analyzeButton" class="btn btn-secondary">
+            <span class="btn-icon">🔍</span>
+            音量を解析する
+          </button>
+          <span class="pill">※ 初回解析時に音声をデコードします</span>
+        </div>
+
+        <!-- ★ 追加: カット後プレビュー -->
+        <div class="field-row" style="margin-top:6px;">
+          <button id="previewCutButton" class="btn btn-secondary" disabled>
+            <span class="btn-icon">▶️</span>
+            カット後のプレビュー再生
+          </button>
+          <span class="pill">※ 無音部分をスキップしながら再生します</span>
+        </div>
+
+        <div id="analyzeStatus" class="status-text"></div>
+
+        <h2 style="margin-top:10px;"><span class="step-tag">3</span> 解析結果</h2>
+        <p class="desc">検出された「話している区間」だけをつないで書き出します。</p>
+
+        <div class="stats" id="statsArea"></div>
+
+        <div id="segmentsContainer" class="segments-list">
+          <div class="segments-empty">まだ解析が行われていません。</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 右：書き出し・進捗・ログ -->
+    <section class="panel">
+      <div class="panel-inner">
+        <h2><span class="step-tag">4</span> 無音をカットして書き出し</h2>
+        <p class="desc">ffmpeg.wasm で動画を再エンコードし、カット後の mp4 を生成します。</p>
+
+        <div class="field-row">
+          <button id="exportButton" class="btn" disabled>
+            <span class="btn-icon">✂️</span>
+            無音をカットして書き出し
+          </button>
+          <span class="pill">※ 長い動画は数十秒～数分かかることがあります</span>
+        </div>
+
+        <div class="progress-bar">
+          <div id="exportProgress" class="progress-bar-inner"></div>
+        </div>
+
+        <div id="exportStatus" class="status-text"></div>
+
+        <a id="downloadLink" href="#" download="cut-output.mp4" style="display:none;">
+          <span>⬇️ カット後動画をダウンロード</span>
+        </a>
+
+        <div class="output-preview">
+          <video id="outputVideo" controls playsinline style="display:none;"></video>
+        </div>
+
+        <h2 style="margin-top:14px;"><span class="step-tag">ℹ</span> 補足</h2>
+        <p class="desc">
+          ・ブラウザで ffmpeg-core.wasm（約 20〜30MB）を読み込んで処理するため、初回ロードに時間がかかることがあります。<br/>
+          ・GitHub Pages 上で動かす場合、必要に応じて ffmpeg-core をリポジトリ内に配置し、
+          <code>corePath</code> をローカルパスに変更しておくと安定します。
+        </p>
+      </div>
+    </section>
+
+    <!-- ログ -->
+    <section class="panel log-panel">
+      <div class="panel-inner">
+        <h2><span class="step-tag">▶</span> 内部ログ</h2>
+        <p class="desc">トラブル時のデバッグ用です（ffmpeg のログもここに出ます）。</p>
+        <textarea id="log" readonly></textarea>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    // ========== DOM 取得 ==========
+    const fileInput = document.getElementById('fileInput');
+    const fileInfo = document.getElementById('fileInfo');
+    const previewVideo = document.getElementById('previewVideo');
+
+    const thresholdSlider = document.getElementById('thresholdSlider');
+    const minVoiceSlider = document.getElementById('minVoiceSlider');
+    const paddingSlider = document.getElementById('paddingSlider');
+
+    const thresholdLabel = document.getElementById('thresholdLabel');
+    const minVoiceLabel = document.getElementById('minVoiceLabel');
+    const paddingLabel = document.getElementById('paddingLabel');
+
+    const analyzeButton = document.getElementById('analyzeButton');
+    const analyzeStatus = document.getElementById('analyzeStatus');
+
+    const statsArea = document.getElementById('statsArea');
+    const segmentsContainer = document.getElementById('segmentsContainer');
+
+    const previewCutButton = document.getElementById('previewCutButton');
+
+    const exportButton = document.getElementById('exportButton');
+    const exportStatus = document.getElementById('exportStatus');
+    const exportProgress = document.getElementById('exportProgress');
+    const downloadLink = document.getElementById('downloadLink');
+    const outputVideo = document.getElementById('outputVideo');
+
+    const logArea = document.getElementById('log');
+
+    // ========== 状態管理 ==========
+    let selectedFile = null;
+    let audioBuffer = null;
+    let detectedSegments = [];
+    let ffmpeg = null;
+    let ffmpegLoaded = false;
+
+    // プレビュー用状態
+    let previewPlaying = false;
+    let previewSegmentIndex = 0;
+
+    // ========== ログ出力 ==========
+    function log(message) {
+      const time = new Date().toISOString().split('T')[1].replace('Z', '');
+      logArea.value += `[${time}] ${message}\n`;
+      logArea.scrollTop = logArea.scrollHeight;
+    }
+
+    // ========== スライダー表示更新 ==========
+    function updateSliderLabels() {
+      thresholdLabel.textContent = `${thresholdSlider.value} dB`;
+      minVoiceLabel.textContent = `${Number(minVoiceSlider.value).toFixed(1)} 秒`;
+      paddingLabel.textContent = `${Number(paddingSlider.value).toFixed(2)} 秒`;
+    }
+
+    updateSliderLabels();
+
+    thresholdSlider.addEventListener('input', () => {
+      updateSliderLabels();
+      if (audioBuffer) {
+        stopPreview();  // スライダー変更時はプレビュー停止
+        runSegmentationOnly();
+      }
+    });
+
+    minVoiceSlider.addEventListener('input', () => {
+      updateSliderLabels();
+      if (audioBuffer) {
+        stopPreview();
+        runSegmentationOnly();
+      }
+    });
+
+    paddingSlider.addEventListener('input', () => {
+      updateSliderLabels();
+      if (audioBuffer) {
+        stopPreview();
+        runSegmentationOnly();
+      }
+    });
+
+    // ========== ffmpeg.wasm 初期化（core-st 使用） ==========
+    function initFFmpegInstance() {
+      if (ffmpeg) return ffmpeg;
+      const { createFFmpeg, fetchFile } = FFmpeg;
+
+      ffmpeg = createFFmpeg({
+        log: true,
+        corePath: 'https://unpkg.com/@ffmpeg/core-st@0.11.1/dist/ffmpeg-core.js',
+        mainName: 'main',
+        progress: (p) => {
+          if (p && typeof p.ratio === 'number') {
+            const ratio = Math.max(0, Math.min(1, p.ratio));
+            exportProgress.style.transform = `scaleX(${ratio})`;
+          }
+        }
+      });
+
+      ffmpeg._fetchFile = fetchFile;
+      return ffmpeg;
+    }
+
+    async function ensureFFmpegLoaded() {
+      initFFmpegInstance();
+      if (!ffmpegLoaded) {
+        log('ffmpeg-core をロード中…');
+        exportStatus.textContent = 'ffmpeg-core をロードしています…（初回のみ数十秒かかる場合があります）';
+        try {
+          await ffmpeg.load();
+          ffmpegLoaded = true;
+          log('ffmpeg-core のロード完了');
+        } catch (err) {
+          console.error(err);
+          log('ffmpeg-core のロードに失敗しました。');
+          exportStatus.textContent = 'ffmpeg-core のロードに失敗しました。ネットワーク環境をご確認ください。';
+          throw err;
+        }
+      }
+    }
+
+    // ========== ファイル選択 ==========
+    fileInput.addEventListener('change', () => {
+      const file = fileInput.files && fileInput.files[0];
+      if (!file) return;
+
+      selectedFile = file;
+      audioBuffer = null;
+      detectedSegments = [];
+      stopPreview();
+      analyzeStatus.textContent = '';
+      analyzeStatus.classList.remove('warn', 'err');
+      statsArea.innerHTML = '';
+      segmentsContainer.innerHTML = '<div class="segments-empty">まだ解析が行われていません。</div>';
+      exportButton.disabled = true;
+      previewCutButton.disabled = true;
+      exportStatus.textContent = '';
+      exportStatus.classList.remove('warn', 'err');
+      exportProgress.style.transform = 'scaleX(0)';
+      downloadLink.style.display = 'none';
+      outputVideo.style.display = 'none';
+      outputVideo.removeAttribute('src');
+
+      const sizeMB = (file.size / (1024 * 1024)).toFixed(1);
+      fileInfo.textContent = `${file.name}（${sizeMB} MB）`;
+
+      const url = URL.createObjectURL(file);
+      previewVideo.src = url;
+      previewVideo.play().catch(() => {});
+
+      log(`動画ファイル選択: ${file.name} (${sizeMB}MB)`);
+    });
+
+    // ========== AudioContext + ffmpeg フォールバックで音声デコード ==========
+    async function decodeAudioIfNeeded() {
+      if (audioBuffer) return audioBuffer;
+      if (!selectedFile) throw new Error('先に動画ファイルを選択してください。');
+
+      analyzeStatus.textContent = '音声トラックをデコード中…';
+      analyzeStatus.classList.remove('warn', 'err');
+      log('AudioContext で音声をデコード開始');
+
+      const arrayBuffer = await selectedFile.arrayBuffer();
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+
+      // 1. AudioContext を試す
+      if (AudioCtx) {
+        const audioCtx = new AudioCtx();
+        try {
+          const decoded = await audioCtx.decodeAudioData(arrayBuffer.slice(0));
+          audioBuffer = decoded;
+          analyzeStatus.textContent =
+            `音声デコード完了：長さ ${decoded.duration.toFixed(2)} 秒（AudioContext）`;
+          log(`AudioContext でデコード成功: duration=${decoded.duration.toFixed(2)}sec, sampleRate=${decoded.sampleRate}`);
+          return audioBuffer;
+        } catch (err) {
+          log(`AudioContext によるデコードに失敗: ${err.message || err}`);
+          log('→ ffmpeg.wasm で解析用 PCM を生成してフォールバックします。');
+        } finally {
+          if (audioCtx && typeof audioCtx.close === 'function') {
+            audioCtx.close();
+          }
+        }
+      } else {
+        log('AudioContext が利用できません。直接 ffmpeg.wasm にフォールバックします。');
+      }
+
+      // 2. ffmpeg.wasm で mono 48kHz PCM を抽出
+      analyzeStatus.textContent = 'ffmpeg で音声トラックを抽出中…';
+      log('ffmpeg で mono 48kHz PCM を生成開始');
+
+      await ensureFFmpegLoaded();
+      const fetchFile = ffmpeg._fetchFile;
+      const inputExt = (selectedFile.name.split('.').pop() || 'mp4').toLowerCase();
+      const inputName = `analysis-input.${inputExt}`;
+      const pcmName = 'analysis-audio.pcm';
+
+      try {
+        ffmpeg.FS('writeFile', inputName, await fetchFile(selectedFile));
+
+        await ffmpeg.run(
+          '-i', inputName,
+          '-vn',
+          '-ac', '1',
+          '-ar', '48000',
+          '-f', 'f32le',
+          pcmName
+        );
+
+        const data = ffmpeg.FS('readFile', pcmName);
+        const dv = new DataView(data.buffer, data.byteOffset, data.byteLength);
+        const samples = data.byteLength / 4;
+        const floatData = new Float32Array(samples);
+        for (let i = 0; i < samples; i++) {
+          floatData[i] = dv.getFloat32(i * 4, true);
+        }
+
+        const sampleRate = 48000;
+        const duration = samples / sampleRate;
+
+        audioBuffer = {
+          sampleRate,
+          duration,
+          numberOfChannels: 1,
+          getChannelData: (ch) => {
+            if (ch !== 0) {
+              throw new Error('mono バッファなので ch=0 のみです');
+            }
+            return floatData;
+          }
+        };
+
+        analyzeStatus.textContent =
+          `音声抽出完了（ffmpeg使用）：長さ ${duration.toFixed(2)} 秒`;
+        log(`ffmpeg 解析用オーディオ生成完了: duration=${duration.toFixed(2)}sec, sampleRate=${sampleRate}`);
+
+        return audioBuffer;
+      } catch (err) {
+        log(`ffmpeg フォールバックでも音声抽出に失敗: ${err.message || err}`);
+        throw err;
+      } finally {
+        try { ffmpeg.FS('unlink', pcmName); } catch (_) {}
+        try { ffmpeg.FS('unlink', inputName); } catch (_) {}
+      }
+    }
+
+    // ========== 無音区間解析ロジック ==========
+    function computeSegmentsFromAudioBuffer(buffer, thresholdDb, minVoiceSec, paddingSec) {
+      const duration = buffer.duration;
+      const sampleRate = buffer.sampleRate;
+      const channelData = buffer.getChannelData(0);
+      const windowDuration = 0.05; // 50ms
+      const windowSize = Math.floor(sampleRate * windowDuration);
+      const totalWindows = Math.floor(channelData.length / windowSize);
+
+      const loudFlags = new Array(totalWindows);
+      for (let i = 0; i < totalWindows; i++) {
+        let sumSq = 0;
+        const offset = i * windowSize;
+        for (let j = 0; j < windowSize; j++) {
+          const s = channelData[offset + j];
+          sumSq += s * s;
+        }
+        const rms = Math.sqrt(sumSq / windowSize);
+        const db = rms <= 1e-8 ? -Infinity : 20 * Math.log10(rms);
+        loudFlags[i] = db >= thresholdDb;
+      }
+
+      const segments = [];
+      let inSegment = false;
+      let segStart = 0;
+      for (let i = 0; i < totalWindows; i++) {
+        const t = i * windowDuration;
+        if (loudFlags[i] && !inSegment) {
+          inSegment = true;
+          segStart = t;
+        } else if (!loudFlags[i] && inSegment) {
+          const segEnd = i * windowDuration;
+          if (segEnd - segStart >= minVoiceSec) {
+            segments.push({ start: segStart, end: segEnd });
+          }
+          inSegment = false;
+        }
+      }
+      if (inSegment) {
+        const segEnd = totalWindows * windowDuration;
+        if (segEnd - segStart >= minVoiceSec) {
+          segments.push({ start: segStart, end: segEnd });
+        }
+      }
+
+      const padded = segments.map(seg => ({
+        start: Math.max(0, seg.start - paddingSec),
+        end: Math.min(duration, seg.end + paddingSec)
+      }));
+
+      padded.sort((a, b) => a.start - b.start);
+      const merged = [];
+      for (const seg of padded) {
+        if (!merged.length) {
+          merged.push({ ...seg });
+        } else {
+          const last = merged[merged.length - 1];
+          if (seg.start <= last.end) {
+            last.end = Math.max(last.end, seg.end);
+          } else {
+            merged.push({ ...seg });
+          }
+        }
+      }
+
+      return merged;
+    }
+
+    function formatTime(sec) {
+      const s = Math.max(0, sec);
+      const m = Math.floor(s / 60);
+      const r = s - m * 60;
+      if (m === 0) return `${r.toFixed(2)}秒`;
+      return `${m}分${r.toFixed(1)}秒`;
+    }
+
+    function refreshStatsAndSegmentsUI() {
+      statsArea.innerHTML = '';
+      segmentsContainer.innerHTML = '';
+
+      if (!audioBuffer) {
+        segmentsContainer.innerHTML = '<div class="segments-empty">まだ解析が行われていません。</div>';
+        return;
+      }
+
+      const original = audioBuffer.duration;
+      const totalKept = detectedSegments.reduce((sum, seg) => sum + (seg.end - seg.start), 0);
+      const ratio = original > 0 ? (totalKept / original) : 0;
+
+      const statHtml = `
+        <div class="stat-card">
+          <div class="stat-label">元動画の長さ</div>
+          <div class="stat-value">${formatTime(original)}</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">カット後の長さ</div>
+          <div class="stat-value accent">${formatTime(totalKept)}</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">残す割合（目安）</div>
+          <div class="stat-value ${ratio < 0.4 ? 'warn' : ''}">${(ratio * 100).toFixed(1)} %</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">検出された区間数</div>
+          <div class="stat-value">${detectedSegments.length} 個</div>
+        </div>
+      `;
+      statsArea.innerHTML = statHtml;
+
+      if (!detectedSegments.length) {
+        segmentsContainer.innerHTML =
+          '<div class="segments-empty">発話区間が検出されませんでした。しきい値（dB）を下げて再解析してみてください。</div>';
+        return;
+      }
+
+      const frag = document.createDocumentFragment();
+      detectedSegments.forEach((seg, idx) => {
+        const li = document.createElement('div');
+        li.className = 'segment-item';
+
+        const start = seg.start;
+        const end = seg.end;
+        const len = end - start;
+
+        const main = document.createElement('div');
+        main.className = 'segment-main';
+
+        const title = document.createElement('div');
+        title.className = 'segment-title';
+        title.textContent = `#${idx + 1}  ${start.toFixed(2)}s 〜 ${end.toFixed(2)}s`;
+
+        const sub = document.createElement('div');
+        sub.className = 'segment-sub';
+        sub.textContent = `長さ：${len.toFixed(2)}秒`;
+
+        main.appendChild(title);
+        main.appendChild(sub);
+
+        const dur = document.createElement('div');
+        dur.className = 'segment-duration';
+        dur.textContent = `+${len.toFixed(2)} s`;
+
+        li.appendChild(main);
+        li.appendChild(dur);
+
+        frag.appendChild(li);
+      });
+
+      segmentsContainer.appendChild(frag);
+    }
+
+    async function runFullAnalysis() {
+      if (!selectedFile) {
+        alert('先に動画ファイルを選択してください。');
+        return;
+      }
+      analyzeButton.disabled = true;
+      analyzeStatus.classList.remove('warn', 'err');
+      analyzeStatus.textContent = '音声解析を実行中…';
+
+      try {
+        const buffer = await decodeAudioIfNeeded();
+        const threshold = Number(thresholdSlider.value);
+        const minVoice = Number(minVoiceSlider.value);
+        const padding = Number(paddingSlider.value);
+
+        log(`無音判定: threshold=${threshold}dB, minVoice=${minVoice}s, padding=${padding}s`);
+        detectedSegments = computeSegmentsFromAudioBuffer(
+          buffer,
+          threshold,
+          minVoice,
+          padding
+        );
+
+        analyzeStatus.textContent = `解析完了：検出区間 ${detectedSegments.length} 個`;
+        if (!detectedSegments.length) {
+          analyzeStatus.classList.add('warn');
+          analyzeStatus.textContent += '（しきい値を下げて再解析してみてください）';
+        }
+
+        refreshStatsAndSegmentsUI();
+        exportButton.disabled = detectedSegments.length === 0;
+        previewCutButton.disabled = detectedSegments.length === 0;
+      } catch (err) {
+        console.error(err);
+        log(`解析エラー: ${err.message || err}`);
+        analyzeStatus.textContent = `解析エラー: ${err.message || err}`;
+        analyzeStatus.classList.add('err');
+        exportButton.disabled = true;
+        previewCutButton.disabled = true;
+      } finally {
+        analyzeButton.disabled = false;
+      }
+    }
+
+    function runSegmentationOnly() {
+      if (!audioBuffer) return;
+      const threshold = Number(thresholdSlider.value);
+      const minVoice = Number(minVoiceSlider.value);
+      const padding = Number(paddingSlider.value);
+
+      log(`（再解析）threshold=${threshold}dB, minVoice=${minVoice}s, padding=${padding}s`);
+      detectedSegments = computeSegmentsFromAudioBuffer(
+        audioBuffer,
+        threshold,
+        minVoice,
+        padding
+      );
+      analyzeStatus.textContent = `解析更新：検出区間 ${detectedSegments.length} 個`;
+      if (!detectedSegments.length) {
+        analyzeStatus.classList.add('warn');
+        analyzeStatus.textContent += '（しきい値を下げて再解析してみてください）';
+      } else {
+        analyzeStatus.classList.remove('warn', 'err');
+      }
+      refreshStatsAndSegmentsUI();
+      exportButton.disabled = detectedSegments.length === 0;
+      previewCutButton.disabled = detectedSegments.length === 0;
+    }
+
+    analyzeButton.addEventListener('click', () => {
+      stopPreview();
+      runFullAnalysis();
+    });
+
+    // ========== カット後プレビュー ==========
+    function startPreview() {
+      if (!detectedSegments.length || !previewVideo.src) return;
+      previewPlaying = true;
+      previewSegmentIndex = 0;
+      previewCutButton.innerHTML = '<span class="btn-icon">⏹</span> プレビュー停止';
+
+      // 最初の区間へジャンプ
+      const firstStart = detectedSegments[0].start;
+      previewVideo.currentTime = Math.max(0, firstStart + 0.02);
+      previewVideo.muted = false; // 必要なら true に
+      previewVideo.play().catch(() => {
+        // 自動再生がブロックされた場合は何もしない
+      });
+    }
+
+    function stopPreview() {
+      if (!previewPlaying) {
+        previewCutButton.innerHTML = '<span class="btn-icon">▶️</span> カット後のプレビュー再生';
+        return;
+      }
+      previewPlaying = false;
+      previewSegmentIndex = 0;
+      previewCutButton.innerHTML = '<span class="btn-icon">▶️</span> カット後のプレビュー再生';
+      // プレビュー停止時、動画自体は止めておく
+      try { previewVideo.pause(); } catch (_) {}
+    }
+
+    previewCutButton.addEventListener('click', () => {
+      if (!detectedSegments.length) return;
+      if (previewPlaying) {
+        stopPreview();
+      } else {
+        startPreview();
+      }
+    });
+
+    // timeupdate で「区間終端 → 次の区間」へジャンプ
+    previewVideo.addEventListener('timeupdate', () => {
+      if (!previewPlaying || !detectedSegments.length) return;
+      const cur = previewVideo.currentTime;
+      const seg = detectedSegments[previewSegmentIndex];
+      if (!seg) {
+        stopPreview();
+        return;
+      }
+      const end = seg.end;
+      if (cur >= end - 0.03) {
+        // 次の区間へ
+        previewSegmentIndex++;
+        const nextSeg = detectedSegments[previewSegmentIndex];
+        if (!nextSeg) {
+          // 最後まで終わったら停止（ループさせたければここで 0 に戻す）
+          stopPreview();
+        } else {
+          previewVideo.currentTime = Math.max(0, nextSeg.start + 0.02);
+        }
+      }
+    });
+
+    // ユーザーが動画を手で止めたらプレビューフラグだけ折る
+    previewVideo.addEventListener('pause', () => {
+      if (previewPlaying && previewVideo.seeking === false) {
+        // 手動停止っぽいときだけフラグを折る
+        previewPlaying = false;
+        previewCutButton.innerHTML = '<span class="btn-icon">▶️</span> カット後のプレビュー再生';
+      }
+    });
+
+    // ========== ffmpeg の filter_complex を生成 ==========
+    function buildFilterComplex(segments) {
+      if (!segments.length) {
+        throw new Error('書き出し対象の区間がありません。');
+      }
+
+      const vParts = [];
+      const aParts = [];
+      const concatInputs = [];
+
+      segments.forEach((seg, idx) => {
+        const start = seg.start.toFixed(3);
+        const end = seg.end.toFixed(3);
+        vParts.push(`[0:v]trim=start=${start}:end=${end},setpts=PTS-STARTPTS[v${idx}]`);
+        aParts.push(`[0:a]atrim=start=${start}:end=${end},asetpts=PTS-STARTPTS[a${idx}]`);
+        concatInputs.push(`[v${idx}][a${idx}]`);
+      });
+
+      const concat = `${concatInputs.join('')}concat=n=${segments.length}:v=1:a=1[v][a]`;
+      const filter = `${vParts.join(';')};${aParts.join(';')};${concat}`;
+      log(`filter_complex: ${filter}`);
+      return filter;
+    }
+
+    // ========== 書き出し ==========
+    async function exportVideo() {
+      if (!selectedFile) {
+        alert('先に動画ファイルを選択してください。');
+        return;
+      }
+      if (!detectedSegments.length) {
+        alert('書き出し対象の区間がありません。しきい値を調整して解析してください。');
+        return;
+      }
+
+      stopPreview();
+
+      exportButton.disabled = true;
+      exportStatus.classList.remove('warn', 'err');
+      exportStatus.textContent = 'ffmpeg で書き出し中…';
+      exportProgress.style.transform = 'scaleX(0)';
+      downloadLink.style.display = 'none';
+      outputVideo.style.display = 'none';
+      outputVideo.removeAttribute('src');
+
+      try {
+        await ensureFFmpegLoaded();
+
+        const inputExt = (selectedFile.name.split('.').pop() || 'mp4').toLowerCase();
+        const inputName = `input.${inputExt}`;
+        const outputName = 'output.mp4';
+
+        log('ffmpeg FS に入力ファイルを書き込み');
+        const fetchFile = ffmpeg._fetchFile;
+        ffmpeg.FS('writeFile', inputName, await fetchFile(selectedFile));
+
+        const filterComplex = buildFilterComplex(detectedSegments);
+
+        exportStatus.textContent = '再エンコード処理中…（ブラウザを閉じないでください）';
+        log(`ffmpeg.run -i ${inputName} ...`);
+
+        await ffmpeg.run(
+          '-i', inputName,
+          '-filter_complex', filterComplex,
+          '-map', '[v]', '-map', '[a]',
+          '-preset', 'veryfast',
+          '-crf', '23',
+          '-movflags', '+faststart',
+          outputName
+        );
+
+        log('ffmpeg 出力読み込み');
+        const data = ffmpeg.FS('readFile', outputName);
+        const blob = new Blob([data.buffer], { type: 'video/mp4' });
+        const url = URL.createObjectURL(blob);
+
+        downloadLink.href = url;
+        downloadLink.style.display = 'inline-flex';
+        downloadLink.download = `cut-${selectedFile.name.replace(/\.[^.]+$/, '')}.mp4`;
+        outputVideo.src = url;
+        outputVideo.style.display = 'block';
+
+        const original = audioBuffer ? audioBuffer.duration : 0;
+        const totalKept = detectedSegments.reduce((sum, seg) => sum + (seg.end - seg.start), 0);
+        exportStatus.textContent =
+          `書き出し完了：${formatTime(original)} → ${formatTime(totalKept)} に短縮されました。`;
+        log('書き出し完了');
+      } catch (err) {
+        console.error(err);
+        exportStatus.textContent = `書き出しエラー: ${err.message || err}`;
+        exportStatus.classList.add('err');
+        log(`書き出しエラー: ${err.message || err}`);
+      } finally {
+        try { ffmpeg.FS('unlink', 'output.mp4'); } catch (_) {}
+        try {
+          const inputExt = (selectedFile.name.split('.').pop() || 'mp4').toLowerCase();
+          ffmpeg.FS('unlink', `input.${inputExt}`);
+        } catch (_) {}
+
+        exportButton.disabled = false;
+      }
+    }
+
+    exportButton.addEventListener('click', () => {
+      exportVideo();
+    });
+  </script>
+</body>
+</html>
