@@ -575,7 +575,7 @@
         </div>
 
         <h2 style="margin-top:10px;"><span class="step-tag">2</span> 無音判定のしきい値を調整</h2>
-        <p class="desc">動画ごとに音量が違うので、dBしきい値をスライダー＆ヒストグラムで調整できます。</p>
+        <p class="desc">動画ごとに音量が違うので、dBヒストグラムとタイムラインを見ながら調整できます。</p>
 
         <div class="slider-group">
           <div class="slider-row">
@@ -595,7 +595,7 @@
           </div>
         </div>
 
-        <!-- 音量ヒストグラム -->
+        <!-- dB分布ヒストグラム -->
         <div class="hist-wrap">
           <div class="hist-title">
             <span>音量ヒストグラム（50msごとの dB 分布）</span>
@@ -604,6 +604,17 @@
             </span>
           </div>
           <canvas id="histCanvas" width="400" height="120"></canvas>
+        </div>
+
+        <!-- カットタイムライン -->
+        <div class="hist-wrap" style="margin-top:6px;">
+          <div class="hist-title">
+            <span>カットタイムライン（動画全体）</span>
+            <span class="hist-legend">
+              緑＝残す区間 / 灰色＝カットされる区間
+            </span>
+          </div>
+          <canvas id="timelineCanvas" width="400" height="60"></canvas>
         </div>
 
         <div class="field-row" style="margin-top:10px;">
@@ -716,6 +727,9 @@
     const histCanvas = document.getElementById('histCanvas');
     const histCtx = histCanvas.getContext('2d');
 
+    const timelineCanvas = document.getElementById('timelineCanvas');
+    const timelineCtx = timelineCanvas.getContext('2d');
+
     // ========== 状態管理 ==========
     let selectedFile = null;
     let audioBuffer = null;
@@ -727,11 +741,15 @@
     let previewPlaying = false;
     let previewSegmentIndex = 0;
 
-    // ヒストグラム状態
+    // ヒストグラム状態（dB分布）
     const HIST_MIN_DB = -80;
     const HIST_MAX_DB = 0;
     const HIST_BINS = 80;
-    let dbHistogram = null; // { bins: [], total, minDb, maxDb }
+    let dbHistogram = null;
+
+    // タイムライン用（各ウィンドウの loud/quiet）
+    let lastWindowFlags = null;
+    let lastWindowDuration = 0.05; // 50ms
 
     // ========== ログ出力 ==========
     function log(message) {
@@ -751,12 +769,13 @@
 
     thresholdSlider.addEventListener('input', () => {
       updateSliderLabels();
+      const t = Number(thresholdSlider.value);
       if (audioBuffer) {
         stopPreview();
         runSegmentationOnly();
       } else {
-        // 音声未解析でも、ヒストグラムがあればしきい値ラインだけ更新
-        renderHistogram(Number(thresholdSlider.value));
+        // 音声未解析の場合はヒストグラムのしきい値線だけ更新
+        renderHistogram(t);
       }
     });
 
@@ -824,7 +843,10 @@
       audioBuffer = null;
       detectedSegments = [];
       dbHistogram = null;
+      lastWindowFlags = null;
       clearHistogram();
+      clearTimeline();
+
       stopPreview();
       analyzeStatus.textContent = '';
       analyzeStatus.classList.remove('warn', 'err');
@@ -864,589 +886,4 @@
       // 1. AudioContext を試す
       if (AudioCtx) {
         const audioCtx = new AudioCtx();
-        try {
-          const decoded = await audioCtx.decodeAudioData(arrayBuffer.slice(0));
-          audioBuffer = decoded;
-          analyzeStatus.textContent =
-            `音声デコード完了：長さ ${decoded.duration.toFixed(2)} 秒（AudioContext）`;
-          log(`AudioContext でデコード成功: duration=${decoded.duration.toFixed(2)}sec, sampleRate=${decoded.sampleRate}`);
-          return audioBuffer;
-        } catch (err) {
-          log(`AudioContext によるデコードに失敗: ${err.message || err}`);
-          log('→ ffmpeg.wasm で解析用 PCM を生成してフォールバックします。');
-        } finally {
-          if (audioCtx && typeof audioCtx.close === 'function') {
-            audioCtx.close();
-          }
-        }
-      } else {
-        log('AudioContext が利用できません。直接 ffmpeg.wasm にフォールバックします。');
-      }
-
-      // 2. ffmpeg.wasm で mono 48kHz PCM を抽出
-      analyzeStatus.textContent = 'ffmpeg で音声トラックを抽出中…';
-      log('ffmpeg で mono 48kHz PCM を生成開始');
-
-      await ensureFFmpegLoaded();
-      const fetchFile = ffmpeg._fetchFile;
-      const inputExt = (selectedFile.name.split('.').pop() || 'mp4').toLowerCase();
-      const inputName = `analysis-input.${inputExt}`;
-      const pcmName = 'analysis-audio.pcm';
-
-      try {
-        ffmpeg.FS('writeFile', inputName, await fetchFile(selectedFile));
-
-        await ffmpeg.run(
-          '-i', inputName,
-          '-vn',
-          '-ac', '1',
-          '-ar', '48000',
-          '-f', 'f32le',
-          pcmName
-        );
-
-        const data = ffmpeg.FS('readFile', pcmName);
-        const dv = new DataView(data.buffer, data.byteOffset, data.byteLength);
-        const samples = data.byteLength / 4;
-        const floatData = new Float32Array(samples);
-        for (let i = 0; i < samples; i++) {
-          floatData[i] = dv.getFloat32(i * 4, true);
-        }
-
-        const sampleRate = 48000;
-        const duration = samples / sampleRate;
-
-        audioBuffer = {
-          sampleRate,
-          duration,
-          numberOfChannels: 1,
-          getChannelData: (ch) => {
-            if (ch !== 0) {
-              throw new Error('mono バッファなので ch=0 のみです');
-            }
-            return floatData;
-          }
-        };
-
-        analyzeStatus.textContent =
-          `音声抽出完了（ffmpeg使用）：長さ ${duration.toFixed(2)} 秒`;
-        log(`ffmpeg 解析用オーディオ生成完了: duration=${duration.toFixed(2)}sec, sampleRate=${sampleRate}`);
-
-        return audioBuffer;
-      } catch (err) {
-        log(`ffmpeg フォールバックでも音声抽出に失敗: ${err.message || err}`);
-        throw err;
-      } finally {
-        try { ffmpeg.FS('unlink', pcmName); } catch (_) {}
-        try { ffmpeg.FS('unlink', inputName); } catch (_) {}
-      }
-    }
-
-    // ========== ヒストグラム描画 ==========
-    function clearHistogram() {
-      if (!histCtx) return;
-      histCtx.clearRect(0, 0, histCanvas.width, histCanvas.height);
-      histCtx.fillStyle = '#05070a';
-      histCtx.fillRect(0, 0, histCanvas.width, histCanvas.height);
-      histCtx.fillStyle = 'rgba(255,255,255,0.08)';
-      histCtx.fillRect(0, histCanvas.height - 18, histCanvas.width, 1);
-    }
-
-    function renderHistogram(thresholdDb) {
-      if (!histCtx) return;
-      const w = histCanvas.width;
-      const h = histCanvas.height;
-
-      // 背景
-      histCtx.clearRect(0, 0, w, h);
-      histCtx.fillStyle = '#05070a';
-      histCtx.fillRect(0, 0, w, h);
-
-      // グリッド（目安線）
-      histCtx.strokeStyle = 'rgba(255,255,255,0.05)';
-      histCtx.lineWidth = 1;
-      histCtx.beginPath();
-      for (let i = 1; i <= 4; i++) {
-        const y = (h - 20) * (i / 4);
-        histCtx.moveTo(0, y);
-        histCtx.lineTo(w, y);
-      }
-      histCtx.stroke();
-
-      if (!dbHistogram || !dbHistogram.bins || dbHistogram.total <= 0) {
-        histCtx.fillStyle = 'rgba(255,255,255,0.3)';
-        histCtx.font = '10px system-ui';
-        histCtx.fillText('解析後に音量分布が表示されます', 8, h / 2);
-        return;
-      }
-
-      const bins = dbHistogram.bins;
-      const total = dbHistogram.total;
-      const maxCount = Math.max(...bins, 1);
-      const barAreaHeight = h - 20;
-      const dx = w / bins.length;
-
-      // 棒を描画（しきい値以上：緑、それ未満：グレー）
-      for (let i = 0; i < bins.length; i++) {
-        const count = bins[i];
-        if (count === 0) continue;
-        const ratio = count / maxCount;
-        const barH = ratio * (barAreaHeight * 0.95);
-
-        // このビンの中心 dB
-        const binCenterRatio = (i + 0.5) / bins.length;
-        const dbCenter = HIST_MIN_DB + binCenterRatio * (HIST_MAX_DB - HIST_MIN_DB);
-
-        if (dbCenter >= thresholdDb) {
-          histCtx.fillStyle = 'rgba(108, 225, 166, 0.9)'; // 緑
-        } else {
-          histCtx.fillStyle = 'rgba(255,255,255,0.25)';   // グレー
-        }
-
-        const x = i * dx;
-        const y = barAreaHeight - barH;
-        histCtx.fillRect(x, y, Math.max(1, dx - 0.5), barH);
-      }
-
-      // しきい値ライン
-      const tRatio = (thresholdDb - HIST_MIN_DB) / (HIST_MAX_DB - HIST_MIN_DB);
-      const tX = Math.max(0, Math.min(w, tRatio * w));
-
-      histCtx.strokeStyle = 'rgba(74,163,255,0.9)';
-      histCtx.lineWidth = 1.2;
-      histCtx.beginPath();
-      histCtx.moveTo(tX, 0);
-      histCtx.lineTo(tX, barAreaHeight + 2);
-      histCtx.stroke();
-
-      // しきい値ラベル
-      histCtx.fillStyle = 'rgba(74,163,255,0.95)';
-      histCtx.font = '10px system-ui';
-      const label = `${thresholdDb.toFixed(0)} dB`;
-      histCtx.fillText(label, Math.min(Math.max(2, tX + 4), w - 40), 10);
-
-      // x 軸（dB 目安）
-      histCtx.fillStyle = 'rgba(255,255,255,0.5)';
-      histCtx.font = '9px system-ui';
-      histCtx.fillText(`${HIST_MIN_DB} dB`, 4, h - 6);
-      const zeroX = w * ((0 - HIST_MIN_DB) / (HIST_MAX_DB - HIST_MIN_DB));
-      histCtx.fillText('0 dB', Math.min(w - 30, zeroX - 12), h - 6);
-    }
-
-    // ========== 無音区間解析ロジック ==========
-    function computeSegmentsFromAudioBuffer(buffer, thresholdDb, minVoiceSec, paddingSec) {
-      const duration = buffer.duration;
-      const sampleRate = buffer.sampleRate;
-      const channelData = buffer.getChannelData(0);
-      const windowDuration = 0.05; // 50ms
-      const windowSize = Math.floor(sampleRate * windowDuration);
-      const totalWindows = Math.floor(channelData.length / windowSize);
-
-      const loudFlags = new Array(totalWindows);
-      const bins = new Array(HIST_BINS).fill(0);
-
-      for (let i = 0; i < totalWindows; i++) {
-        let sumSq = 0;
-        const offset = i * windowSize;
-        for (let j = 0; j < windowSize; j++) {
-          const s = channelData[offset + j];
-          sumSq += s * s;
-        }
-        const rms = Math.sqrt(sumSq / windowSize);
-        let db = rms <= 1e-8 ? -Infinity : 20 * Math.log10(rms);
-
-        // ヒストグラム用にクランプ
-        if (!isFinite(db)) db = HIST_MIN_DB;
-        const clamped = Math.max(HIST_MIN_DB, Math.min(HIST_MAX_DB, db));
-        let r = (clamped - HIST_MIN_DB) / (HIST_MAX_DB - HIST_MIN_DB);
-        let idx = Math.floor(r * HIST_BINS);
-        if (idx < 0) idx = 0;
-        if (idx >= HIST_BINS) idx = HIST_BINS - 1;
-        bins[idx]++;
-
-        loudFlags[i] = db >= thresholdDb;
-      }
-
-      dbHistogram = {
-        bins,
-        total: totalWindows,
-        minDb: HIST_MIN_DB,
-        maxDb: HIST_MAX_DB
-      };
-      renderHistogram(thresholdDb);
-
-      const segments = [];
-      let inSegment = false;
-      let segStart = 0;
-      for (let i = 0; i < totalWindows; i++) {
-        const t = i * windowDuration;
-        if (loudFlags[i] && !inSegment) {
-          inSegment = true;
-          segStart = t;
-        } else if (!loudFlags[i] && inSegment) {
-          const segEnd = i * windowDuration;
-          if (segEnd - segStart >= minVoiceSec) {
-            segments.push({ start: segStart, end: segEnd });
-          }
-          inSegment = false;
-        }
-      }
-      if (inSegment) {
-        const segEnd = totalWindows * windowDuration;
-        if (segEnd - segStart >= minVoiceSec) {
-          segments.push({ start: segStart, end: segEnd });
-        }
-      }
-
-      const padded = segments.map(seg => ({
-        start: Math.max(0, seg.start - paddingSec),
-        end: Math.min(duration, seg.end + paddingSec)
-      }));
-
-      padded.sort((a, b) => a.start - b.start);
-      const merged = [];
-      for (const seg of padded) {
-        if (!merged.length) {
-          merged.push({ ...seg });
-        } else {
-          const last = merged[merged.length - 1];
-          if (seg.start <= last.end) {
-            last.end = Math.max(last.end, seg.end);
-          } else {
-            merged.push({ ...seg });
-          }
-        }
-      }
-
-      return merged;
-    }
-
-    function formatTime(sec) {
-      const s = Math.max(0, sec);
-      const m = Math.floor(s / 60);
-      const r = s - m * 60;
-      if (m === 0) return `${r.toFixed(2)}秒`;
-      return `${m}分${r.toFixed(1)}秒`;
-    }
-
-    function refreshStatsAndSegmentsUI() {
-      statsArea.innerHTML = '';
-      segmentsContainer.innerHTML = '';
-
-      if (!audioBuffer) {
-        segmentsContainer.innerHTML = '<div class="segments-empty">まだ解析が行われていません。</div>';
-        return;
-      }
-
-      const original = audioBuffer.duration;
-      const totalKept = detectedSegments.reduce((sum, seg) => sum + (seg.end - seg.start), 0);
-      const ratio = original > 0 ? (totalKept / original) : 0;
-
-      const statHtml = `
-        <div class="stat-card">
-          <div class="stat-label">元動画の長さ</div>
-          <div class="stat-value">${formatTime(original)}</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-label">カット後の長さ</div>
-          <div class="stat-value accent">${formatTime(totalKept)}</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-label">残す割合（目安）</div>
-          <div class="stat-value ${ratio < 0.4 ? 'warn' : ''}">${(ratio * 100).toFixed(1)} %</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-label">検出された区間数</div>
-          <div class="stat-value">${detectedSegments.length} 個</div>
-        </div>
-      `;
-      statsArea.innerHTML = statHtml;
-
-      if (!detectedSegments.length) {
-        segmentsContainer.innerHTML =
-          '<div class="segments-empty">発話区間が検出されませんでした。しきい値（dB）を下げて再解析してみてください。</div>';
-        return;
-      }
-
-      const frag = document.createDocumentFragment();
-      detectedSegments.forEach((seg, idx) => {
-        const li = document.createElement('div');
-        li.className = 'segment-item';
-
-        const start = seg.start;
-        const end = seg.end;
-        const len = end - start;
-
-        const main = document.createElement('div');
-        main.className = 'segment-main';
-
-        const title = document.createElement('div');
-        title.className = 'segment-title';
-        title.textContent = `#${idx + 1}  ${start.toFixed(2)}s 〜 ${end.toFixed(2)}s`;
-
-        const sub = document.createElement('div');
-        sub.className = 'segment-sub';
-        sub.textContent = `長さ：${len.toFixed(2)}秒`;
-
-        main.appendChild(title);
-        main.appendChild(sub);
-
-        const dur = document.createElement('div');
-        dur.className = 'segment-duration';
-        dur.textContent = `+${len.toFixed(2)} s`;
-
-        li.appendChild(main);
-        li.appendChild(dur);
-
-        frag.appendChild(li);
-      });
-
-      segmentsContainer.appendChild(frag);
-    }
-
-    async function runFullAnalysis() {
-      if (!selectedFile) {
-        alert('先に動画ファイルを選択してください。');
-        return;
-      }
-      analyzeButton.disabled = true;
-      analyzeStatus.classList.remove('warn', 'err');
-      analyzeStatus.textContent = '音声解析を実行中…';
-
-      try {
-        const buffer = await decodeAudioIfNeeded();
-        const threshold = Number(thresholdSlider.value);
-        const minVoice = Number(minVoiceSlider.value);
-        const padding = Number(paddingSlider.value);
-
-        log(`無音判定: threshold=${threshold}dB, minVoice=${minVoice}s, padding=${padding}s`);
-        detectedSegments = computeSegmentsFromAudioBuffer(
-          buffer,
-          threshold,
-          minVoice,
-          padding
-        );
-
-        analyzeStatus.textContent = `解析完了：検出区間 ${detectedSegments.length} 個`;
-        if (!detectedSegments.length) {
-          analyzeStatus.classList.add('warn');
-          analyzeStatus.textContent += '（しきい値を下げて再解析してみてください）';
-        }
-
-        refreshStatsAndSegmentsUI();
-        exportButton.disabled = detectedSegments.length === 0;
-        previewCutButton.disabled = detectedSegments.length === 0;
-      } catch (err) {
-        console.error(err);
-        log(`解析エラー: ${err.message || err}`);
-        analyzeStatus.textContent = `解析エラー: ${err.message || err}`;
-        analyzeStatus.classList.add('err');
-        exportButton.disabled = true;
-        previewCutButton.disabled = true;
-      } finally {
-        analyzeButton.disabled = false;
-      }
-    }
-
-    function runSegmentationOnly() {
-      if (!audioBuffer) return;
-      const threshold = Number(thresholdSlider.value);
-      const minVoice = Number(minVoiceSlider.value);
-      const padding = Number(paddingSlider.value);
-
-      log(`（再解析）threshold=${threshold}dB, minVoice=${minVoice}s, padding=${padding}s`);
-      detectedSegments = computeSegmentsFromAudioBuffer(
-        audioBuffer,
-        threshold,
-        minVoice,
-        padding
-      );
-      analyzeStatus.textContent = `解析更新：検出区間 ${detectedSegments.length} 個`;
-      if (!detectedSegments.length) {
-        analyzeStatus.classList.add('warn');
-        analyzeStatus.textContent += '（しきい値を下げて再解析してみてください）';
-      } else {
-        analyzeStatus.classList.remove('warn', 'err');
-      }
-      refreshStatsAndSegmentsUI();
-      exportButton.disabled = detectedSegments.length === 0;
-      previewCutButton.disabled = detectedSegments.length === 0;
-    }
-
-    analyzeButton.addEventListener('click', () => {
-      stopPreview();
-      runFullAnalysis();
-    });
-
-    // ========== カット後プレビュー ==========
-    function startPreview() {
-      if (!detectedSegments.length || !previewVideo.src) return;
-      previewPlaying = true;
-      previewSegmentIndex = 0;
-      previewCutButton.innerHTML = '<span class="btn-icon">⏹</span> プレビュー停止';
-
-      const firstStart = detectedSegments[0].start;
-      previewVideo.currentTime = Math.max(0, firstStart + 0.02);
-      previewVideo.muted = false;
-      previewVideo.play().catch(() => {});
-    }
-
-    function stopPreview() {
-      if (!previewPlaying) {
-        previewCutButton.innerHTML = '<span class="btn-icon">▶️</span> カット後のプレビュー再生';
-        return;
-      }
-      previewPlaying = false;
-      previewSegmentIndex = 0;
-      previewCutButton.innerHTML = '<span class="btn-icon">▶️</span> カット後のプレビュー再生';
-      try { previewVideo.pause(); } catch (_) {}
-    }
-
-    previewCutButton.addEventListener('click', () => {
-      if (!detectedSegments.length) return;
-      if (previewPlaying) {
-        stopPreview();
-      } else {
-        startPreview();
-      }
-    });
-
-    previewVideo.addEventListener('timeupdate', () => {
-      if (!previewPlaying || !detectedSegments.length) return;
-      const cur = previewVideo.currentTime;
-      const seg = detectedSegments[previewSegmentIndex];
-      if (!seg) {
-        stopPreview();
-        return;
-      }
-      const end = seg.end;
-      if (cur >= end - 0.03) {
-        previewSegmentIndex++;
-        const nextSeg = detectedSegments[previewSegmentIndex];
-        if (!nextSeg) {
-          stopPreview();
-        } else {
-          previewVideo.currentTime = Math.max(0, nextSeg.start + 0.02);
-        }
-      }
-    });
-
-    previewVideo.addEventListener('pause', () => {
-      if (previewPlaying && previewVideo.seeking === false) {
-        previewPlaying = false;
-        previewCutButton.innerHTML = '<span class="btn-icon">▶️</span> カット後のプレビュー再生';
-      }
-    });
-
-    // ========== ffmpeg filter_complex 生成 ==========
-    function buildFilterComplex(segments) {
-      if (!segments.length) {
-        throw new Error('書き出し対象の区間がありません。');
-      }
-
-      const vParts = [];
-      const aParts = [];
-      const concatInputs = [];
-
-      segments.forEach((seg, idx) => {
-        const start = seg.start.toFixed(3);
-        const end = seg.end.toFixed(3);
-        vParts.push(`[0:v]trim=start=${start}:end=${end},setpts=PTS-STARTPTS[v${idx}]`);
-        aParts.push(`[0:a]atrim=start=${start}:end=${end},asetpts=PTS-STARTPTS[a${idx}]`);
-        concatInputs.push(`[v${idx}][a${idx}]`);
-      });
-
-      const concat = `${concatInputs.join('')}concat=n=${segments.length}:v=1:a=1[v][a]`;
-      const filter = `${vParts.join(';')};${aParts.join(';')};${concat}`;
-      log(`filter_complex: ${filter}`);
-      return filter;
-    }
-
-    // ========== 書き出し ==========
-    async function exportVideo() {
-      if (!selectedFile) {
-        alert('先に動画ファイルを選択してください。');
-        return;
-      }
-      if (!detectedSegments.length) {
-        alert('書き出し対象の区間がありません。しきい値を調整して解析してください。');
-        return;
-      }
-
-      stopPreview();
-
-      exportButton.disabled = true;
-      exportStatus.classList.remove('warn', 'err');
-      exportStatus.textContent = 'ffmpeg で書き出し中…';
-      exportProgress.style.transform = 'scaleX(0)';
-      downloadLink.style.display = 'none';
-      outputVideo.style.display = 'none';
-      outputVideo.removeAttribute('src');
-
-      try {
-        await ensureFFmpegLoaded();
-
-        const inputExt = (selectedFile.name.split('.').pop() || 'mp4').toLowerCase();
-        const inputName = `input.${inputExt}`;
-        const outputName = 'output.mp4';
-
-        log('ffmpeg FS に入力ファイルを書き込み');
-        const fetchFile = ffmpeg._fetchFile;
-        ffmpeg.FS('writeFile', inputName, await fetchFile(selectedFile));
-
-        const filterComplex = buildFilterComplex(detectedSegments);
-
-        exportStatus.textContent = '再エンコード処理中…（ブラウザを閉じないでください）';
-        log(`ffmpeg.run -i ${inputName} ...`);
-
-        await ffmpeg.run(
-          '-i', inputName,
-          '-filter_complex', filterComplex,
-          '-map', '[v]', '-map', '[a]',
-          '-preset', 'veryfast',
-          '-crf', '23',
-          '-movflags', '+faststart',
-          outputName
-        );
-
-        log('ffmpeg 出力読み込み');
-        const data = ffmpeg.FS('readFile', outputName);
-        const blob = new Blob([data.buffer], { type: 'video/mp4' });
-        const url = URL.createObjectURL(blob);
-
-        downloadLink.href = url;
-        downloadLink.style.display = 'inline-flex';
-        downloadLink.download = `cut-${selectedFile.name.replace(/\.[^.]+$/, '')}.mp4`;
-        outputVideo.src = url;
-        outputVideo.style.display = 'block';
-
-        const original = audioBuffer ? audioBuffer.duration : 0;
-        const totalKept = detectedSegments.reduce((sum, seg) => sum + (seg.end - seg.start), 0);
-        exportStatus.textContent =
-          `書き出し完了：${formatTime(original)} → ${formatTime(totalKept)} に短縮されました。`;
-        log('書き出し完了');
-      } catch (err) {
-        console.error(err);
-        exportStatus.textContent = `書き出しエラー: ${err.message || err}`;
-        exportStatus.classList.add('err');
-        log(`書き出しエラー: ${err.message || err}`);
-      } finally {
-        try { ffmpeg.FS('unlink', 'output.mp4'); } catch (_) {}
-        try {
-          const inputExt = (selectedFile.name.split('.').pop() || 'mp4').toLowerCase();
-          ffmpeg.FS('unlink', `input.${inputExt}`);
-        } catch (_) {}
-
-        exportButton.disabled = false;
-      }
-    }
-
-    exportButton.addEventListener('click', () => {
-      exportVideo();
-    });
-
-    // 初期ヒストグラムは空表示
-    clearHistogram();
-  </script>
-</body>
-</html>
+        try
