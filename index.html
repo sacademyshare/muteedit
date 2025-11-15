@@ -579,7 +579,7 @@
         </div>
 
         <h2 style="margin-top:10px;"><span class="step-tag">2</span> 無音判定のしきい値を調整</h2>
-        <p class="desc">動画ごとに音量が違うので、dBヒストグラムと波形タイムラインを見ながら調整できます。</p>
+        <p class="desc">上：dBヒストグラム / 下：波形タイムライン（クリックでジャンプ）。</p>
 
         <div class="slider-group">
           <div class="slider-row">
@@ -604,7 +604,7 @@
           <div class="hist-title">
             <span>音量ヒストグラム（50msごとの dB 分布）</span>
             <span class="hist-legend">
-              緑＝しきい値以上（「声」とみなすゾーン） / グレー＝それ未満
+              緑＝しきい値以上 / グレー＝しきい値未満
             </span>
           </div>
           <canvas id="histCanvas" width="400" height="120"></canvas>
@@ -613,9 +613,9 @@
         <!-- 波形タイムライン -->
         <div class="hist-wrap" style="margin-top:6px;">
           <div class="hist-title">
-            <span>カットタイムライン（波形表示 / クリックでジャンプ）</span>
+            <span>波形タイムライン（クリックでプレビュー位置にジャンプ）</span>
             <span class="hist-legend">
-              緑＝残す区間 / 灰色＝カットされる区間（時間軸）
+              緑＝残す区間 / 灰色＝カット区間 / 白線＝再生位置 / 黄線＝クリック位置
             </span>
           </div>
           <canvas id="timelineCanvas" width="400" height="70"></canvas>
@@ -741,22 +741,25 @@
     let ffmpeg = null;
     let ffmpegLoaded = false;
 
-    // プレビュー用状態
+    // プレビュー状態
     let previewPlaying = false;
     let previewSegmentIndex = 0;
 
-    // RMS & flags per window（タイムライン波形用）
-    let windowRms = null;
-    let windowFlags = null; // true = loud(keep), false = quiet(cut)
-    let windowDuration = 0.05; // 50ms
+    // タイムライン用
+    let windowRms = null;    // 各 50ms ウィンドウの RMS
+    let windowFlags = null;  // true = loud(keep), false = quiet(cut)
+    let windowDuration = 0.05;
 
-    // dBヒストグラム状態
+    // dBヒストグラム
     const HIST_MIN_DB = -80;
     const HIST_MAX_DB = 0;
     const HIST_BINS = 80;
     let dbHistogram = null; // {totalBins, countWindows}
 
-    // ========== ログ出力 ==========
+    // クリック位置マーカー（秒）
+    let clickMarkerTime = null;
+
+    // ========== ログ ==========
     function log(message) {
       const time = new Date().toISOString().split('T')[1].replace('Z', '');
       logArea.value += `[${time}] ${message}\n`;
@@ -800,11 +803,10 @@
       }
     });
 
-    // ========== ffmpeg.wasm 初期化（core-st 使用） ==========
+    // ========== ffmpeg.wasm 初期化 ==========
     function initFFmpegInstance() {
       if (ffmpeg) return ffmpeg;
       const { createFFmpeg, fetchFile } = FFmpeg;
-
       ffmpeg = createFFmpeg({
         log: true,
         corePath: 'https://unpkg.com/@ffmpeg/core-st@0.11.1/dist/ffmpeg-core.js',
@@ -816,7 +818,6 @@
           }
         }
       });
-
       ffmpeg._fetchFile = fetchFile;
       return ffmpeg;
     }
@@ -850,6 +851,7 @@
       dbHistogram = null;
       windowRms = null;
       windowFlags = null;
+      clickMarkerTime = null;
       clearHistogram();
       clearTimeline();
 
@@ -877,7 +879,7 @@
       log(`動画ファイル選択: ${file.name} (${sizeMB}MB)`);
     });
 
-    // ========== AudioContext + ffmpeg フォールバックで音声デコード ==========
+    // ========== Audio デコード ==========
     async function decodeAudioIfNeeded() {
       if (audioBuffer) return audioBuffer;
       if (!selectedFile) throw new Error('先に動画ファイルを選択してください。');
@@ -889,7 +891,6 @@
       const arrayBuffer = await selectedFile.arrayBuffer();
       const AudioCtx = window.AudioContext || window.webkitAudioContext;
 
-      // 1. AudioContext を試す
       if (AudioCtx) {
         const audioCtx = new AudioCtx();
         try {
@@ -911,7 +912,7 @@
         log('AudioContext が利用できません。直接 ffmpeg.wasm にフォールバックします。');
       }
 
-      // 2. ffmpeg.wasm で mono 48kHz PCM を抽出
+      // ffmpeg フォールバック（同じく mono 48kHz）
       analyzeStatus.textContent = 'ffmpeg で音声トラックを抽出中…';
       log('ffmpeg で mono 48kHz PCM を生成開始');
 
@@ -923,7 +924,6 @@
 
       try {
         ffmpeg.FS('writeFile', inputName, await fetchFile(selectedFile));
-
         await ffmpeg.run(
           '-i', inputName,
           '-vn',
@@ -932,7 +932,6 @@
           '-f', 'f32le',
           pcmName
         );
-
         const data = ffmpeg.FS('readFile', pcmName);
         const dv = new DataView(data.buffer, data.byteOffset, data.byteLength);
         const samples = data.byteLength / 4;
@@ -943,15 +942,12 @@
 
         const sampleRate = 48000;
         const duration = samples / sampleRate;
-
         audioBuffer = {
           sampleRate,
           duration,
           numberOfChannels: 1,
           getChannelData: (ch) => {
-            if (ch !== 0) {
-              throw new Error('mono バッファなので ch=0 のみです');
-            }
+            if (ch !== 0) throw new Error('mono バッファなので ch=0 のみ');
             return floatData;
           }
         };
@@ -959,7 +955,6 @@
         analyzeStatus.textContent =
           `音声抽出完了（ffmpeg使用）：長さ ${duration.toFixed(2)} 秒`;
         log(`ffmpeg 解析用オーディオ生成完了: duration=${duration.toFixed(2)}sec, sampleRate=${sampleRate}`);
-
         return audioBuffer;
       } catch (err) {
         log(`ffmpeg フォールバックでも音声抽出に失敗: ${err.message || err}`);
@@ -970,7 +965,7 @@
       }
     }
 
-    // ========== ヒストグラム & タイムライン描画 ==========
+    // ========== ヒストグラム & タイムライン ==========
     function clearHistogram() {
       if (!histCtx) return;
       const w = histCanvas.width;
@@ -1087,51 +1082,75 @@
       }
 
       const N = windowRms.length;
-      const midY = h / 2;
       const maxRms = Math.max(...windowRms, 1e-6);
-      const usableHeight = h * 0.45; // 上下方向の最大振幅
-
       const dx = w / N;
 
-      // ベースライン
-      timelineCtx.strokeStyle = 'rgba(255,255,255,0.15)';
-      timelineCtx.lineWidth = 1;
-      timelineCtx.beginPath();
-      timelineCtx.moveTo(0, midY);
-      timelineCtx.lineTo(w, midY);
-      timelineCtx.stroke();
-
+      // 各X帯を全面塗りつぶす（カット/残す＋音量に応じた濃さ）
       for (let i = 0; i < N; i++) {
         const rms = windowRms[i];
         const amp = rms / maxRms; // 0〜1
-        const barH = amp * usableHeight;
-        const x = i * dx;
-        const barW = Math.max(1, dx - 0.5);
-
         const loud = windowFlags[i];
-        timelineCtx.fillStyle = loud
-          ? 'rgba(108,225,166,0.9)'   // keep
-          : 'rgba(255,255,255,0.25)'; // cut
 
-        timelineCtx.fillRect(x, midY - barH, barW, barH * 2);
+        let alphaBase, alpha;
+        if (loud) {
+          // 残す区間：緑、音量が大きいほど濃く
+          alphaBase = 0.25;
+          alpha = alphaBase + amp * 0.55;
+          timelineCtx.fillStyle = `rgba(108,225,166,${alpha.toFixed(3)})`;
+        } else {
+          // カット区間：薄いグレー
+          alphaBase = 0.05;
+          alpha = alphaBase + amp * 0.35;
+          timelineCtx.fillStyle = `rgba(255,255,255,${alpha.toFixed(3)})`;
+        }
+
+        const x = i * dx;
+        const barW = Math.max(1, dx + 0.5);
+        timelineCtx.fillRect(x, 0, barW, h);
       }
 
-      // 時間ラベル
+      // 0s / total ラベル
       const dur = audioBuffer.duration;
-      timelineCtx.fillStyle = 'rgba(255,255,255,0.6)';
+      timelineCtx.fillStyle = 'rgba(255,255,255,0.7)';
       timelineCtx.font = '9px system-ui';
       timelineCtx.fillText('0s', 4, h - 4);
       const label = dur.toFixed(1) + 's';
       timelineCtx.fillText(label, w - 40, h - 4);
+
+      // 再生位置マーカー（白）
+      if (!isNaN(previewVideo.currentTime) && dur > 0) {
+        const playRatio = Math.max(0, Math.min(1, previewVideo.currentTime / dur));
+        const playX = playRatio * w;
+        timelineCtx.strokeStyle = 'rgba(255,255,255,0.9)';
+        timelineCtx.lineWidth = 1.5;
+        timelineCtx.beginPath();
+        timelineCtx.moveTo(playX, 0);
+        timelineCtx.lineTo(playX, h);
+        timelineCtx.stroke();
+      }
+
+      // クリック位置マーカー（黄色）
+      if (clickMarkerTime != null && dur > 0) {
+        const clickRatio = Math.max(0, Math.min(1, clickMarkerTime / dur));
+        const clickX = clickRatio * w;
+        timelineCtx.strokeStyle = 'rgba(255,220,0,0.95)';
+        timelineCtx.lineWidth = 1.3;
+        timelineCtx.setLineDash([4, 3]);
+        timelineCtx.beginPath();
+        timelineCtx.moveTo(clickX, 0);
+        timelineCtx.lineTo(clickX, h);
+        timelineCtx.stroke();
+        timelineCtx.setLineDash([]);
+      }
     }
 
-    // ========== 無音区間解析ロジック ==========
+    // ========== 無音区間解析 ==========
     function computeSegmentsFromAudioBuffer(buffer, thresholdDb, minVoiceSec, paddingSec) {
       const duration = buffer.duration;
       const sampleRate = buffer.sampleRate;
       const channelData = buffer.getChannelData(0);
 
-      const winDur = 0.05; // 50ms
+      const winDur = 0.05;
       const winSize = Math.floor(sampleRate * winDur);
       const totalWindows = Math.floor(channelData.length / winSize);
 
@@ -1166,7 +1185,6 @@
       windowRms = rmsArr;
       windowFlags = loudFlags;
       windowDuration = winDur;
-
       dbHistogram = {
         totalBins,
         countWindows: totalWindows
@@ -1175,7 +1193,7 @@
       renderHistogram(thresholdDb);
       renderTimeline();
 
-      // loudFlags から連続区間を抽出
+      // loudFlags から連続区間へ
       const segments = [];
       let inSegment = false;
       let segStart = 0;
@@ -1199,7 +1217,6 @@
         }
       }
 
-      // パディング & マージ
       const padded = segments.map(seg => ({
         start: Math.max(0, seg.start - paddingSec),
         end: Math.min(duration, seg.end + paddingSec)
@@ -1219,7 +1236,6 @@
           }
         }
       }
-
       return merged;
     }
 
@@ -1414,6 +1430,10 @@
     });
 
     previewVideo.addEventListener('timeupdate', () => {
+      if (audioBuffer && windowRms) {
+        renderTimeline(); // 再生位置マーカー更新
+      }
+
       if (!previewPlaying || !detectedSegments.length) return;
       const cur = previewVideo.currentTime;
       const seg = detectedSegments[previewSegmentIndex];
@@ -1437,6 +1457,7 @@
       if (previewPlaying && previewVideo.seeking === false) {
         previewPlaying = false;
         previewCutButton.innerHTML = '<span class="btn-icon">▶️</span> カット後のプレビュー再生';
+        renderTimeline();
       }
     });
 
@@ -1448,18 +1469,21 @@
       const ratio = Math.max(0, Math.min(1, x / timelineCanvas.width));
       const targetTime = ratio * audioBuffer.duration;
 
+      clickMarkerTime = targetTime; // マーカー更新
+
       if (!detectedSegments.length) {
-        // まだカット情報がない場合は、そのままジャンプ
         previewVideo.currentTime = targetTime;
         previewVideo.play().catch(() => {});
+        renderTimeline();
         return;
       }
 
       if (previewPlaying) {
-        // カットプレビューモード中：クリック位置以降で最初の発話区間へ飛ぶ
+        // カットプレビュー中：クリック位置以降の最初の発話区間へ
         let idx = detectedSegments.findIndex(seg => seg.end > targetTime);
         if (idx === -1) {
           stopPreview();
+          renderTimeline();
           return;
         }
         previewSegmentIndex = idx;
@@ -1467,10 +1491,11 @@
         previewVideo.currentTime = Math.max(0, start + 0.02);
         previewVideo.play().catch(() => {});
       } else {
-        // 通常：その時間にジャンプしてそのまま再生
+        // 通常：その時間へジャンプ
         previewVideo.currentTime = targetTime;
         previewVideo.play().catch(() => {});
       }
+      renderTimeline();
     });
 
     // ========== ffmpeg filter_complex 生成 ==========
@@ -1571,7 +1596,6 @@
           const inputExt = (selectedFile.name.split('.').pop() || 'mp4').toLowerCase();
           ffmpeg.FS('unlink', `input.${inputExt}`);
         } catch (_) {}
-
         exportButton.disabled = false;
       }
     }
