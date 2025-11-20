@@ -576,16 +576,22 @@
         </div>
       </div>
 
-      <div style="display:flex; gap:16px;">
-        <button id="previewCutBtn" class="btn btn-secondary" disabled>
-          <svg class="icon icon-btn" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
-          カット後のプレビュー
-        </button>
-        <button id="stopPreviewBtn" class="btn btn-secondary" style="display:none; color:#ff6b6b;">
-          <svg class="icon icon-btn" viewBox="0 0 24 24"><path d="M6 6h12v12H6z"/></svg>
-          停止
-        </button>
-      </div>
+      <div style="display:flex; gap:16px; flex-wrap:wrap;">
+  <button id="previewCutBtn" class="btn btn-secondary" disabled>
+    <svg class="icon icon-btn" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+    カット後のプレビュー
+  </button>
+  <button id="stopPreviewBtn" class="btn btn-secondary" style="display:none; color:#ff6b6b;">
+    <svg class="icon icon-btn" viewBox="0 0 24 24"><path d="M6 6h12v12H6z"/></svg>
+    停止
+  </button>
+  <!-- 追加：低画質なめらかプレビュー生成 -->
+  <button id="smoothPreviewBtn" class="btn btn-secondary">
+    <svg class="icon icon-btn" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+    なめらかプレビュー生成
+  </button>
+</div>
+
 
       <!-- Export Section -->
       <div class="export-section">
@@ -683,6 +689,7 @@
   const exportFormat = document.getElementById('exportFormat');
   const previewCutBtn = document.getElementById('previewCutBtn');
   const stopPreviewBtn = document.getElementById('stopPreviewBtn');
+  const smoothPreviewBtn = document.getElementById('smoothPreviewBtn'); // ★追加
   const downloadBtn = document.getElementById('downloadBtn');
   const exportProgress = document.getElementById('exportProgress');
   const exportStatus = document.getElementById('exportStatus');
@@ -705,9 +712,10 @@
   let rawFile = null;
   let detectedSegments = []; // {start, end, isActive}
   let isPreviewingCuts = false;
-  let previewSegments = [];
-  let previewIndex = 0;
+  let previewTimeout = null; // timeupdate 版にしたなら削除してOK
   let isProcessing = false; // Lock for export
+  let previewUrl = null;    // ★追加：低画質プレビュー用のURL
+
 
 
   const log = (msg) => {
@@ -947,6 +955,90 @@
   }
 
   stopPreviewBtn.addEventListener('click', stopPreview);
+
+    // --- Smooth Preview (低画質なめらかプレビュー) ---
+  smoothPreviewBtn.addEventListener('click', async () => {
+    const activeSegs = detectedSegments.filter(s => s.isActive);
+    if (!rawFile || !activeSegs.length || isProcessing) {
+      log("プレビュー生成ができません（ファイル未選択 or セグメントなし or 処理中）");
+      return;
+    }
+
+    isProcessing = true;
+    smoothPreviewBtn.disabled = true;
+    exportStatus.innerText = "プレビュー用の動画を生成中...";
+    exportProgress.style.width = "0%";
+    log("低画質プレビュー動画を生成開始...");
+
+    try {
+      if (!ffmpeg) {
+        await initFFmpeg();
+      }
+      const { fetchFile } = FFmpeg;
+
+      // 入力ファイルを書き込み（exportと区別するため別ファイル名）
+      ffmpeg.FS("writeFile", "preview_in.src", await fetchFile(rawFile));
+
+      // カット区間用の filter_complex を作成（動画＋音声を concat）
+      let filter = "";
+      let maps = "";
+      activeSegs.forEach((s, i) => {
+        filter += `[0:v]trim=${s.start}:${s.end},setpts=PTS-STARTPTS[v${i}];`;
+        filter += `[0:a]atrim=${s.start}:${s.end},asetpts=PTS-STARTPTS[a${i}];`;
+        maps += `[v${i}][a${i}]`;
+      });
+      filter += `${maps}concat=n=${activeSegs.length}:v=1:a=1[out]`;
+
+      const outName = "preview.mp4";
+      const args = [
+        "-i", "preview_in.src",
+        "-filter_complex", filter,
+        "-map", "[out]",
+        "-vf", "scale=640:-2",      // 解像度を落とす
+        "-r", "24",                 // フレームレートも少し落とす
+        "-c:v", "libx264",
+        "-preset", "ultrafast",     // 速度重視
+        "-crf", "30",               // 画質より軽さ優先
+        "-c:a", "aac",
+        outName
+      ];
+
+      await ffmpeg.run(...args);
+
+      const data = ffmpeg.FS("readFile", outName);
+      ffmpeg.FS("unlink", "preview_in.src");
+      ffmpeg.FS("unlink", outName);
+
+      // 既存のプレビューURLがあれば解放
+      if (previewUrl) {
+        URL.revokeObjectURL(previewUrl);
+      }
+      previewUrl = URL.createObjectURL(
+        new Blob([data.buffer], { type: "video/mp4" })
+      );
+
+      // プレイヤーにセットして再生
+      previewPlayer.src = previewUrl;
+      previewPlayer.currentTime = 0;
+      previewPlayer.play();
+
+      log("低画質プレビュー動画の生成が完了しました");
+      exportStatus.innerText = "プレビュー動画が生成されました（低画質）";
+      exportProgress.style.width = "100%";
+    } catch (e) {
+      console.error(e);
+      log("プレビュー生成エラー: " + e.message);
+      exportStatus.innerText = "プレビュー生成中にエラーが発生しました";
+      exportProgress.style.width = "0%";
+    } finally {
+      isProcessing = false;
+      smoothPreviewBtn.disabled = false;
+      // 次の処理用にバーはリセットしておく
+      setTimeout(() => {
+        exportProgress.style.width = "0%";
+      }, 500);
+    }
+  });
 
   // イベント駆動のプレビュー制御
   previewPlayer.addEventListener('timeupdate', () => {
