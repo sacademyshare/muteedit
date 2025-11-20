@@ -177,6 +177,7 @@
         display: contents;
       }
 
+      /* 1. Top: File Input */
       .drop-zone {
         order: 1;
         margin: 16px 16px 10px 16px !important;
@@ -189,6 +190,7 @@
       .drop-zone-text { margin: 0 !important; font-size: 13px; }
       .drop-zone div:last-child { display: none; }
 
+      /* 2. Preview */
       .preview-container {
         order: 2;
         margin: 0 16px 16px 16px !important;
@@ -196,6 +198,7 @@
         width: calc(100% - 32px) !important;
       }
 
+      /* 3-8. Controls & Timeline */
       .panel-right > div, .panel-left > div {
         order: 10;
         margin: 0 16px 16px 16px;
@@ -204,11 +207,12 @@
       
       .panel-right > div:has(#waveformCanvas) { order: 3; }
       .segment-list-container { order: 4; }
-      .panel-right > div:has(#smoothPreviewBtn) { order: 5; }
+      .panel-right > div:has(#previewCutBtn) { order: 5; }
       .stats-card { order: 6; }
       .control-group { order: 7; }
       .log-console { order: 8; }
 
+      /* 9. Export */
       .export-section {
         order: 100;
         margin: 16px 16px 40px 16px !important;
@@ -223,6 +227,7 @@
     }
     h2 svg { color: var(--primary); width: 18px; height: 18px; }
 
+    /* --- Components --- */
     .glass-card {
       background: var(--glass-bg);
       border: 1px solid var(--glass-border);
@@ -354,6 +359,16 @@
     .btn-secondary:hover { background: var(--glass-border); }
     .btn-danger { color: var(--danger); border-color: rgba(255, 92, 92, 0.3); }
     .btn-danger:hover { background: rgba(255, 92, 92, 0.1); }
+
+    /* カット後プレビューボタンをわかりやすく */
+    .cut-preview-btn {
+      min-width: 220px;
+      justify-content: flex-start;
+    }
+    .cut-preview-btn.playing {
+      color: var(--danger);
+      border-color: rgba(255, 92, 92, 0.4);
+    }
 
     .export-section {
       background: var(--glass-bg); backdrop-filter: blur(24px);
@@ -509,11 +524,10 @@
         <div class="slider-item">
           <div class="slider-header">
             <span>しきい値 (Threshold)</span>
-            <!-- ★ 初期表示を -48 dB に変更 -->
+            <!-- 初期値を -48 dB に変更 -->
             <span class="label-val" id="thresholdVal">-48 dB</span>
           </div>
           <div class="slider-desc">この値より小さい音を「無音」とみなしてカットします。</div>
-          <!-- ★ デフォルト値を -48 に変更 -->
           <input type="range" id="threshold" min="-60" max="-10" value="-48" step="1">
         </div>
 
@@ -550,6 +564,7 @@
       
       <div class="preview-container">
         <video id="previewPlayer" playsinline controls preload="auto"></video>
+
       </div>
 
       <div>
@@ -573,15 +588,15 @@
       </div>
 
       <div style="display:flex; gap:16px; flex-wrap:wrap;">
-        <!-- ★ 最初に表示されるのは「なめらかプレビュー生成」のみ -->
+        <!-- 最初はこのボタンのみ表示 -->
         <button id="smoothPreviewBtn" class="btn btn-secondary">
           <svg class="icon icon-btn" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
           なめらかプレビュー生成
         </button>
-        <!-- ★ 生成完了後に表示される再生/停止トグルボタン -->
-        <button id="cutPreviewToggleBtn" class="btn btn-secondary" style="display:none;">
+        <!-- 生成後に表示される、再生 / 停止トグルボタン -->
+        <button id="cutPreviewToggleBtn" class="btn btn-secondary cut-preview-btn" style="display:none;">
           <svg class="icon icon-btn" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
-          カット後のプレビュー再生
+          カット後プレビュー再生
         </button>
       </div>
 
@@ -697,16 +712,17 @@
   const sMinDur = document.getElementById('minDuration');
   const sPadding = document.getElementById('padding');
 
-  // State
+   // State
   let ffmpeg = null;
   let audioBuffer = null;
-  let rawFile = null;
-  let rawFileOriginal = null;
+  let rawFile = null;           // 解析・書き出し用
+  let rawFileOriginal = null;   // 明示的にオリジナルを保持（拡張用）
   let detectedSegments = []; // {start, end, isActive}
-  let isProcessing = false;
-  let previewProxyUrl = null;   // 低解像度プレビュー用オリジナル
-  let previewUrl = null;        // カット済みなめらかプレビュー
-  let hasPreviewVideo = false;  // カット後プレビューが生成済みかどうか
+  let isProcessing = false; // Lock for export / preview
+  let previewProxyUrl = null;   // 低解像度オリジナル用
+  let previewUrl = null;        // カット後なめらかプレビュー用
+  let hasSmoothPreview = false; // カット後プレビューが生成済みか
+  let isCutPreviewPlaying = false;
 
   const log = (msg) => {
     const t = new Date().toLocaleTimeString();
@@ -724,7 +740,9 @@
       updateSliderUI(el.id, el.value, el.id==='threshold'?' dB':' s');
       if(audioBuffer) drawWaveform(audioBuffer.getChannelData(0));
     });
-    el.addEventListener('change', () => { if(audioBuffer) detectSilence(); });
+    el.addEventListener('change', () => { 
+      if(audioBuffer) detectSilence(); 
+    });
   });
 
   // Initialize FFmpeg
@@ -752,16 +770,8 @@
     rawFileOriginal = file;
     rawFile = file;
 
-    // オリジナルで一旦プレビュー
+    // ひとまずオリジナルでプレビュー（後でプロキシができたら差し替え）
     previewPlayer.src = URL.createObjectURL(file);
-
-    // カット済みプレビュー関連をリセット
-    if (previewUrl) {
-      URL.revokeObjectURL(previewUrl);
-      previewUrl = null;
-    }
-    hasPreviewVideo = false;
-    cutPreviewToggleBtn.style.display = 'none';
 
     audioBuffer = null;
     detectedSegments = [];
@@ -772,14 +782,24 @@
     statNew.innerText = "--:--";
     statSaving.innerText = "";
     segmentListBody.innerHTML = '<div style="padding:20px; text-align:center; color:#888;">解析待ち...</div>';
+
     const ctx = waveformCanvas.getContext('2d');
     ctx.clearRect(0,0,waveformCanvas.width, waveformCanvas.height);
+
     document.querySelector('.drop-zone-text').innerText = file.name;
     log(`File Selected: ${file.name}`);
 
-    // 低解像度プロキシをバックグラウンドで作成
+    // 状態リセット
+    hasSmoothPreview = false;
+    isCutPreviewPlaying = false;
+    cutPreviewToggleBtn.style.display = 'none';
+    cutPreviewToggleBtn.classList.remove('playing');
+    cutPreviewToggleBtn.disabled = true;
+
+    // プレビュー用フル長プロキシをバックグラウンドで生成
     createPreviewProxy(file);
   });
+
 
   // Analyze
   analyzeBtn.addEventListener('click', async () => {
@@ -797,8 +817,12 @@
       }
       detectSilence();
       log("解析完了");
-    } catch(e) { log("解析エラー: " + e.message); } 
-    finally { analyzeBtn.disabled = false; }
+    } catch(e) { 
+      log("解析エラー: " + e.message); 
+    } 
+    finally { 
+      analyzeBtn.disabled = false; 
+    }
   });
 
   // オリジナルから「プレビュー用の低解像度動画」を一度だけ作る
@@ -925,6 +949,11 @@
     
     const valid = detectedSegments.some(s => s.isActive);
     exportBtn.disabled = !valid;
+
+    // カット後プレビュー生成済みなら、ONセグメントがないときはボタンを無効化
+    if (hasSmoothPreview) {
+      cutPreviewToggleBtn.disabled = !valid;
+    }
   }
 
   function drawWaveform(data) {
@@ -939,6 +968,7 @@
     const scale = (h/2)*0.9 / (maxAmp||1);
     const step = Math.ceil(data.length/w);
 
+    // Draw Base Wave
     ctx.beginPath(); ctx.strokeStyle='#444'; ctx.lineWidth=1;
     for(let x=0; x<w; x++) {
       const val = data[x*step]||0; const y=val*scale;
@@ -980,23 +1010,7 @@
     });
   }
 
-  // --- カット後プレビュー再生ボタンの表示内容を更新 ---
-  function updateCutPreviewButtonState(isPlaying) {
-    if (!hasPreviewVideo) return;
-    if (isPlaying) {
-      cutPreviewToggleBtn.innerHTML = `
-        <svg class="icon icon-btn" viewBox="0 0 24 24"><path d="M6 6h12v12H6z"/></svg>
-        カット後のプレビュー停止
-      `;
-    } else {
-      cutPreviewToggleBtn.innerHTML = `
-        <svg class="icon icon-btn" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
-        カット後のプレビュー再生
-      `;
-    }
-  }
-
-  // --- Smooth Preview (低画質なめらかプレビュー) ---
+  // --- なめらかプレビュー生成（低画質・カット後） ---
   smoothPreviewBtn.addEventListener('click', async () => {
     const activeSegs = detectedSegments.filter(s => s.isActive);
     if (!rawFile || !activeSegs.length || isProcessing) {
@@ -1062,16 +1076,19 @@
         new Blob([data.buffer], { type: "video/mp4" })
       );
 
-      // カット済みプレビュー動画をプレイヤーにセット（ここでは再生は開始しない）
+      // カット後プレビューに切り替え（自動再生はせず、トグルボタンで再生）
       previewPlayer.src = previewUrl;
       previewPlayer.currentTime = 0;
 
-      hasPreviewVideo = true;
+      hasSmoothPreview = true;
+      isCutPreviewPlaying = false;
+
       cutPreviewToggleBtn.style.display = 'inline-flex';
-      updateCutPreviewButtonState(false);
+      cutPreviewToggleBtn.disabled = false;
+      updateCutPreviewButtonUI();
 
       log("低画質プレビュー動画の生成が完了しました");
-      exportStatus.innerText = "プレビュー動画が生成されました（低画質）";
+      exportStatus.innerText = "プレビュー動画が生成されました（低画質・カット後）";
       exportProgress.style.width = "100%";
     } catch (e) {
       console.error(e);
@@ -1087,24 +1104,38 @@
     }
   });
 
-  // カット後プレビュー再生/停止ボタン
+  function updateCutPreviewButtonUI() {
+    if (!hasSmoothPreview) {
+      cutPreviewToggleBtn.style.display = 'none';
+      return;
+    }
+    if (isCutPreviewPlaying) {
+      cutPreviewToggleBtn.innerHTML = `
+        <svg class="icon icon-btn" viewBox="0 0 24 24"><path d="M6 6h12v12H6z"/></svg>
+        カット後プレビュー停止
+      `;
+      cutPreviewToggleBtn.classList.add('playing');
+    } else {
+      cutPreviewToggleBtn.innerHTML = `
+        <svg class="icon icon-btn" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+        カット後プレビュー再生
+      `;
+      cutPreviewToggleBtn.classList.remove('playing');
+    }
+  }
+
+  // カット後プレビュー再生 / 停止トグル
   cutPreviewToggleBtn.addEventListener('click', () => {
-    if (!hasPreviewVideo) return;
-    if (previewPlayer.paused || previewPlayer.ended) {
+    if (!hasSmoothPreview || cutPreviewToggleBtn.disabled) return;
+
+    if (previewPlayer.paused) {
       previewPlayer.play();
-      updateCutPreviewButtonState(true);
+      isCutPreviewPlaying = true;
     } else {
       previewPlayer.pause();
-      updateCutPreviewButtonState(false);
+      isCutPreviewPlaying = false;
     }
-  });
-
-  // 動画プレイヤー側の再生/停止とも同期させる
-  previewPlayer.addEventListener('play', () => {
-    if (hasPreviewVideo) updateCutPreviewButtonState(true);
-  });
-  previewPlayer.addEventListener('pause', () => {
-    if (hasPreviewVideo) updateCutPreviewButtonState(false);
+    updateCutPreviewButtonUI();
   });
 
   // --- Export Handlers ---
@@ -1186,6 +1217,7 @@
   // XML / EDL Generator
   function downloadXML(segments) {
     let edl = `TITLE: CUT_PROJECT\nFCM: NON-DROP FRAME\n`;
+    
     let content = edl;
     let recIn = 0;
     
@@ -1217,7 +1249,7 @@
     log("EDLファイルをダウンロードしました");
   }
 
-  // Seek on waveform
+  // Seek
   waveformCanvas.addEventListener('click', (e) => {
     if(!audioBuffer) return;
     const r = waveformCanvas.getBoundingClientRect();
