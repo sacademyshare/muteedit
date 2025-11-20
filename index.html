@@ -665,14 +665,14 @@
     </div>
   </div>
 
-  <script>
+<script>
   // --- Modal & Theme ---
   const helpBtn = document.getElementById('helpBtn');
   const helpModal = document.getElementById('helpModal');
   const closeHelp = document.getElementById('closeHelp');
   helpBtn.onclick = () => helpModal.classList.add('open');
   closeHelp.onclick = () => helpModal.classList.remove('open');
-  helpModal.onclick = (e) => { if(e.target===helpModal) helpModal.classList.remove('open'); };
+  helpModal.onclick = (e) => { if (e.target === helpModal) helpModal.classList.remove('open'); };
 
   const themeToggle = document.getElementById('themeToggle');
   const iconSun = document.getElementById('iconSun');
@@ -683,10 +683,10 @@
     document.body.classList.toggle('light-mode', !isDarkMode);
     iconSun.style.display = isDarkMode ? 'none' : 'block';
     iconMoon.style.display = isDarkMode ? 'block' : 'none';
-    if(audioBuffer) drawWaveform(audioBuffer.getChannelData(0));
+    if (audioBuffer) drawWaveform(audioBuffer.getChannelData(0));
   };
 
-  // --- Core Logic ---
+  // --- Core Elements ---
   const fileInput = document.getElementById('fileInput');
   const previewPlayer = document.getElementById('previewPlayer');
   const waveformCanvas = document.getElementById('waveformCanvas');
@@ -712,48 +712,66 @@
   const sMinDur = document.getElementById('minDuration');
   const sPadding = document.getElementById('padding');
 
-   // State
+  // --- State ---
   let ffmpeg = null;
   let audioBuffer = null;
-  let rawFile = null;           // 解析・書き出し用
-  let rawFileOriginal = null;   // 明示的にオリジナルを保持（拡張用）
+  let rawFile = null;
+  let rawFileOriginal = null;
   let detectedSegments = []; // {start, end, isActive}
-  let isProcessing = false; // Lock for export / preview
-  let previewProxyUrl = null;   // 低解像度オリジナル用
-  let previewUrl = null;        // カット後なめらかプレビュー用
-  let hasSmoothPreview = false; // カット後プレビューが生成済みか
+  let hasSmoothPreview = false;
   let isCutPreviewPlaying = false;
+  let isProcessing = false;         // FFmpeg処理中フラグ（プレビュー / エクスポート共有）
+  let previewUrl = null;            // カット後なめらかプレビュー用の URL
 
   const log = (msg) => {
     const t = new Date().toLocaleTimeString();
     logConsole.innerText = `[${t}] ${msg}\n` + logConsole.innerText;
   };
+
   const formatTime = (sec) => {
     const m = Math.floor(sec / 60);
     const s = Math.floor(sec % 60);
     return `${m}:${s.toString().padStart(2, '0')}`;
   };
-  const updateSliderUI = (id, val, unit) => document.getElementById(id+'Val').innerText = val+unit;
+
+  const updateSliderUI = (id, val, unit) =>
+    document.getElementById(id + 'Val').innerText = val + unit;
+
+  // 解析中 / プレビュー生成中はここでロック
+  function setControlsLocked(lock) {
+    [sThreshold, sMinDur, sPadding].forEach(el => el.disabled = lock);
+    // ファイルがないときは解析ボタンは押せない
+    analyzeBtn.disabled = lock || !rawFile;
+    // audioBuffer がない間はプレビュー生成は押せない
+    smoothPreviewBtn.disabled = lock || !audioBuffer;
+    // プレビュー再生ボタンは、生成済みかつロックしていないときだけ
+    cutPreviewToggleBtn.disabled = lock || !hasSmoothPreview;
+  }
 
   [sThreshold, sMinDur, sPadding].forEach(el => {
     el.addEventListener('input', () => {
-      updateSliderUI(el.id, el.value, el.id==='threshold'?' dB':' s');
-      if(audioBuffer) drawWaveform(audioBuffer.getChannelData(0));
+      updateSliderUI(el.id, el.value, el.id === 'threshold' ? ' dB' : ' s');
+      if (audioBuffer) drawWaveform(audioBuffer.getChannelData(0));
     });
-    el.addEventListener('change', () => { 
-      if(audioBuffer) detectSilence(); 
+    el.addEventListener('change', () => {
+      if (audioBuffer) {
+        detectSilence();
+        if (hasSmoothPreview) {
+          exportStatus.innerText = 'パラメータが変更されました。なめらかプレビューを再生成してください。';
+        }
+      }
     });
   });
 
   // Initialize FFmpeg
   const initFFmpeg = async () => {
-    if(ffmpeg) return;
+    if (ffmpeg) return;
     const { createFFmpeg } = FFmpeg;
     ffmpeg = createFFmpeg({
       log: false,
       corePath: 'https://unpkg.com/@ffmpeg/core@0.11.0/dist/ffmpeg-core.js',
       progress: ({ ratio }) => {
-        if(ratio >= 0 && ratio <= 1) {
+        if (ratio >= 0 && ratio <= 1 && isProcessing) {
           exportProgress.style.width = `${ratio * 100}%`;
           exportStatus.innerText = `処理中... ${Math.round(ratio * 100)}%`;
         }
@@ -762,7 +780,7 @@
     await ffmpeg.load();
   };
 
-  // Input
+  // --- File Input ---
   fileInput.addEventListener('change', (e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -770,159 +788,147 @@
     rawFileOriginal = file;
     rawFile = file;
 
-    // ひとまずオリジナルでプレビュー（後でプロキシができたら差し替え）
+    // オリジナルをそのままプレビュー（この段階ではカット前）
     previewPlayer.src = URL.createObjectURL(file);
 
+    // 状態リセット
     audioBuffer = null;
     detectedSegments = [];
+    hasSmoothPreview = false;
+    isCutPreviewPlaying = false;
+    isProcessing = false;
+
     exportBtn.disabled = true;
     downloadBtn.style.display = 'none';
+    cutPreviewToggleBtn.style.display = 'none';
+    cutPreviewToggleBtn.disabled = true;
+
     analyzeBtn.disabled = false;
-    statOriginal.innerText = "--:--";
-    statNew.innerText = "--:--";
-    statSaving.innerText = "";
-    segmentListBody.innerHTML = '<div style="padding:20px; text-align:center; color:#888;">解析待ち...</div>';
+    smoothPreviewBtn.disabled = true;  // 解析が終わるまでは押せない
+
+    statOriginal.innerText = '--:--';
+    statNew.innerText = '--:--';
+    statSaving.innerText = '';
+
+    segmentListBody.innerHTML =
+      '<div style="padding:20px; text-align:center; color:#888;">解析待ち...</div>';
 
     const ctx = waveformCanvas.getContext('2d');
-    ctx.clearRect(0,0,waveformCanvas.width, waveformCanvas.height);
+    ctx.clearRect(0, 0, waveformCanvas.width, waveformCanvas.height);
 
     document.querySelector('.drop-zone-text').innerText = file.name;
     log(`File Selected: ${file.name}`);
+    exportStatus.innerText = '';
+    exportProgress.style.width = '0%';
 
-    // 状態リセット
-    hasSmoothPreview = false;
-    isCutPreviewPlaying = false;
-    cutPreviewToggleBtn.style.display = 'none';
-    cutPreviewToggleBtn.classList.remove('playing');
-    cutPreviewToggleBtn.disabled = true;
-
-    // プレビュー用フル長プロキシをバックグラウンドで生成
-    createPreviewProxy(file);
+    setControlsLocked(false);
   });
 
-
-  // Analyze
+  // --- 音量解析 ＋ 初回なめらかプレビュー生成 ---
   analyzeBtn.addEventListener('click', async () => {
-    if(!rawFile) return;
-    analyzeBtn.disabled = true;
-    log("解析を開始...");
+    if (!rawFile) return;
+    if (isProcessing) return;
+
+    setControlsLocked(true);
+    exportStatus.innerText = '解析中...';
+    exportProgress.style.width = '0%';
+    log('解析を開始...');
+
     try {
       const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-      try {
-        const ab = await rawFile.arrayBuffer();
-        audioBuffer = await audioCtx.decodeAudioData(ab.slice(0));
-      } catch(e) {
-        log("FFmpegで音声抽出中...");
-        audioBuffer = await decodeWithFFmpeg(rawFile, audioCtx);
+
+      if (!audioBuffer) {
+        try {
+          const ab = await rawFile.arrayBuffer();
+          audioBuffer = await audioCtx.decodeAudioData(ab.slice(0));
+        } catch (e) {
+          log('FFmpegで音声抽出中...');
+          audioBuffer = await decodeWithFFmpeg(rawFile, audioCtx);
+        }
       }
+
       detectSilence();
-      log("解析完了");
-    } catch(e) { 
-      log("解析エラー: " + e.message); 
-    } 
-    finally { 
-      analyzeBtn.disabled = false; 
+      log('解析完了。なめらかプレビューを生成します...');
+      exportStatus.innerText = 'なめらかプレビューを生成中...';
+
+      await generateSmoothPreview();   // 解析完了と同時にプレビュー生成
+
+      exportStatus.innerText = 'なめらかプレビューが生成されました。';
+    } catch (e) {
+      console.error(e);
+      log('解析 / プレビュー生成エラー: ' + e.message);
+      exportStatus.innerText = '解析またはプレビュー生成中にエラーが発生しました。';
+    } finally {
+      setControlsLocked(false);
+      exportProgress.style.width = '0%';
     }
   });
 
-  // オリジナルから「プレビュー用の低解像度動画」を一度だけ作る
-  async function createPreviewProxy(file) {
-    try {
-      if (!ffmpeg) {
-        await initFFmpeg();
-      }
-      const { fetchFile } = FFmpeg;
-
-      log("プレビュー用の軽量動画を作成中...");
-
-      ffmpeg.FS("writeFile", "proxy_in.src", await fetchFile(file));
-
-      const outName = "proxy_preview.mp4";
-      const args = [
-        "-i", "proxy_in.src",
-        "-vf", "scale=640:-2",
-        "-r", "24",
-        "-c:v", "libx264",
-        "-preset", "ultrafast",
-        "-crf", "30",
-        "-c:a", "aac",
-        "-b:a", "96k",
-        outName
-      ];
-
-      await ffmpeg.run(...args);
-
-      const data = ffmpeg.FS("readFile", outName);
-
-      ffmpeg.FS("unlink", "proxy_in.src");
-      ffmpeg.FS("unlink", outName);
-
-      if (previewProxyUrl) {
-        URL.revokeObjectURL(previewProxyUrl);
-      }
-
-      previewProxyUrl = URL.createObjectURL(
-        new Blob([data.buffer], { type: "video/mp4" })
-      );
-
-      const currentTime = previewPlayer.currentTime || 0;
-      previewPlayer.src = previewProxyUrl;
-      previewPlayer.currentTime = currentTime;
-      log("プレビュー用軽量動画に切り替えました");
-    } catch (e) {
-      console.error(e);
-      log("プレビュー用動画作成に失敗したため、オリジナルを使用します: " + e.message);
-    }
-  }
-
   async function decodeWithFFmpeg(file, audioCtx) {
-    if(!ffmpeg) await initFFmpeg();
+    if (!ffmpeg) await initFFmpeg();
     const { fetchFile } = FFmpeg;
     ffmpeg.FS('writeFile', 'temp.mov', await fetchFile(file));
-    await ffmpeg.run('-i', 'temp.mov', '-vn', '-acodec', 'pcm_s16le', '-ar', '44100', '-ac', '1', 'out.wav');
+    await ffmpeg.run(
+      '-i', 'temp.mov',
+      '-vn', '-acodec', 'pcm_s16le',
+      '-ar', '44100', '-ac', '1',
+      'out.wav'
+    );
     const data = ffmpeg.FS('readFile', 'out.wav');
-    ffmpeg.FS('unlink', 'temp.mov'); ffmpeg.FS('unlink', 'out.wav');
+    ffmpeg.FS('unlink', 'temp.mov');
+    ffmpeg.FS('unlink', 'out.wav');
     return await audioCtx.decodeAudioData(data.buffer);
   }
 
-  // Core Detection
+  // --- 無音検出 ---
   function detectSilence() {
-    if(!audioBuffer) return;
+    if (!audioBuffer) return;
     const rawData = audioBuffer.getChannelData(0);
     const sr = audioBuffer.sampleRate;
     const thDB = parseFloat(sThreshold.value);
     const minDur = parseFloat(sMinDur.value);
     const pad = parseFloat(sPadding.value);
     const winSize = Math.floor(sr * 0.05);
-    
+
     const segments = [];
-    let isSpeaking = false; let startFrame = 0;
-    for(let i=0; i<rawData.length; i+=winSize) {
+    let isSpeaking = false;
+    let startFrame = 0;
+
+    for (let i = 0; i < rawData.length; i += winSize) {
       let sum = 0;
-      const end = Math.min(i+winSize, rawData.length);
-      for(let j=i; j<end; j++) sum += rawData[j]*rawData[j];
-      const db = 20 * Math.log10(Math.sqrt(sum/(end-i)));
+      const end = Math.min(i + winSize, rawData.length);
+      for (let j = i; j < end; j++) sum += rawData[j] * rawData[j];
+      const db = 20 * Math.log10(Math.sqrt(sum / (end - i)) || 1e-8);
       const isLoud = db > thDB;
-      if(isLoud && !isSpeaking) { isSpeaking = true; startFrame = i; }
-      else if(!isLoud && isSpeaking) { isSpeaking = false; segments.push({start:startFrame/sr, end:i/sr}); }
+      if (isLoud && !isSpeaking) {
+        isSpeaking = true;
+        startFrame = i;
+      } else if (!isLoud && isSpeaking) {
+        isSpeaking = false;
+        segments.push({ start: startFrame / sr, end: i / sr });
+      }
     }
-    if(isSpeaking) segments.push({start:startFrame/sr, end:rawData.length/sr});
+    if (isSpeaking) segments.push({ start: startFrame / sr, end: rawData.length / sr });
 
     let merged = [];
-    if(segments.length > 0) {
-      let cur = {start:Math.max(0, segments[0].start - pad), end:segments[0].end + pad};
-      for(let k=1; k<segments.length; k++) {
+    if (segments.length > 0) {
+      let cur = {
+        start: Math.max(0, segments[0].start - pad),
+        end: segments[0].end + pad
+      };
+      for (let k = 1; k < segments.length; k++) {
         const nS = Math.max(0, segments[k].start - pad);
         const nE = segments[k].end + pad;
-        if(nS <= cur.end) cur.end = Math.max(cur.end, nE);
-        else {
-          if(cur.end - cur.start >= minDur) merged.push(cur);
-          cur = {start:nS, end:nE};
+        if (nS <= cur.end) {
+          cur.end = Math.max(cur.end, nE);
+        } else {
+          if (cur.end - cur.start >= minDur) merged.push(cur);
+          cur = { start: nS, end: nE };
         }
       }
-      if(cur.end - cur.start >= minDur) merged.push(cur);
+      if (cur.end - cur.start >= minDur) merged.push(cur);
     }
-    
+
     detectedSegments = merged.map(s => ({
       start: Math.max(0, s.start),
       end: Math.min(audioBuffer.duration, s.end),
@@ -932,25 +938,26 @@
     updateUIState();
   }
 
-  // Update everything (Waveform, List, Stats)
+  // --- UI 更新 ---
   function updateUIState() {
-    if(!audioBuffer) return;
+    if (!audioBuffer) return;
     drawWaveform(audioBuffer.getChannelData(0));
     renderSegmentList();
-    
+
     const orig = audioBuffer.duration;
     let newDur = 0;
-    detectedSegments.forEach(s => { if(s.isActive) newDur += (s.end - s.start); });
-    
+    detectedSegments.forEach(s => {
+      if (s.isActive) newDur += (s.end - s.start);
+    });
+
     statOriginal.innerText = formatTime(orig);
     statNew.innerText = formatTime(newDur);
     const saved = orig - newDur;
-    statSaving.innerText = `-${orig>0?Math.round((saved/orig)*100):0}%`;
-    
+    statSaving.innerText = `-${orig > 0 ? Math.round((saved / orig) * 100) : 0}%`;
+
     const valid = detectedSegments.some(s => s.isActive);
     exportBtn.disabled = !valid;
 
-    // カット後プレビュー生成済みなら、ONセグメントがないときはボタンを無効化
     if (hasSmoothPreview) {
       cutPreviewToggleBtn.disabled = !valid;
     }
@@ -960,45 +967,58 @@
     const ctx = waveformCanvas.getContext('2d');
     const w = waveformCanvas.width = waveformCanvas.offsetWidth;
     const h = waveformCanvas.height = waveformCanvas.offsetHeight;
-    ctx.clearRect(0,0,w,h); 
-    ctx.fillStyle = '#080808'; ctx.fillRect(0,0,w,h);
-    
-    let maxAmp = 0;
-    for(let i=0; i<data.length; i+=100) { const v = Math.abs(data[i]); if(v>maxAmp) maxAmp=v; }
-    const scale = (h/2)*0.9 / (maxAmp||1);
-    const step = Math.ceil(data.length/w);
+    ctx.clearRect(0, 0, w, h);
+    ctx.fillStyle = '#080808';
+    ctx.fillRect(0, 0, w, h);
 
-    // Draw Base Wave
-    ctx.beginPath(); ctx.strokeStyle='#444'; ctx.lineWidth=1;
-    for(let x=0; x<w; x++) {
-      const val = data[x*step]||0; const y=val*scale;
-      ctx.moveTo(x,h/2-y); ctx.lineTo(x,h/2+y);
+    let maxAmp = 0;
+    for (let i = 0; i < data.length; i += 100) {
+      const v = Math.abs(data[i]);
+      if (v > maxAmp) maxAmp = v;
+    }
+    const scale = (h / 2) * 0.9 / (maxAmp || 1);
+    const step = Math.ceil(data.length / w);
+
+    ctx.beginPath();
+    ctx.strokeStyle = '#444';
+    ctx.lineWidth = 1;
+    for (let x = 0; x < w; x++) {
+      const val = data[x * step] || 0;
+      const y = val * scale;
+      ctx.moveTo(x, h / 2 - y);
+      ctx.lineTo(x, h / 2 + y);
     }
     ctx.stroke();
 
     const totalSec = data.length / audioBuffer.sampleRate;
     detectedSegments.forEach(s => {
-      const x = (s.start/totalSec)*w;
-      const wid = ((s.end-s.start)/totalSec)*w;
+      const x = (s.start / totalSec) * w;
+      const wid = ((s.end - s.start) / totalSec) * w;
       ctx.fillStyle = s.isActive ? 'rgba(141,194,31,0.3)' : 'rgba(255,50,50,0.1)';
-      ctx.fillRect(x,0,wid,h);
+      ctx.fillRect(x, 0, wid, h);
     });
 
     const thVal = parseFloat(sThreshold.value);
     const ratio = (thVal - (-60)) / 50;
-    const ly = h/2 - (h/2 * ratio);
-    ctx.beginPath(); ctx.strokeStyle='#4aa3ff'; ctx.setLineDash([4,4]);
-    ctx.moveTo(0,ly); ctx.lineTo(w,ly); ctx.moveTo(0,h-ly); ctx.lineTo(w,h-ly);
-    ctx.stroke(); ctx.setLineDash([]);
+    const ly = h / 2 - (h / 2 * ratio);
+    ctx.beginPath();
+    ctx.strokeStyle = '#4aa3ff';
+    ctx.setLineDash([4, 4]);
+    ctx.moveTo(0, ly);
+    ctx.lineTo(w, ly);
+    ctx.moveTo(0, h - ly);
+    ctx.lineTo(w, h - ly);
+    ctx.stroke();
+    ctx.setLineDash([]);
   }
 
   function renderSegmentList() {
     segmentListBody.innerHTML = '';
     detectedSegments.forEach((s, idx) => {
       const div = document.createElement('div');
-      div.className = `segment-row ${s.isActive?'':'inactive'}`;
+      div.className = `segment-row ${s.isActive ? '' : 'inactive'}`;
       div.innerHTML = `
-        <span class="seg-id">#${idx+1}</span>
+        <span class="seg-id">#${idx + 1}</span>
         <span class="seg-time">${s.start.toFixed(2)}s - ${s.end.toFixed(2)}s</span>
         <span class="seg-status">${s.isActive ? '✔' : '✖'}</span>
       `;
@@ -1010,29 +1030,25 @@
     });
   }
 
-  // --- なめらかプレビュー生成（低画質・カット後） ---
-  smoothPreviewBtn.addEventListener('click', async () => {
+  // --- なめらかプレビュー生成（カット後、低画質） ---
+  async function generateSmoothPreview() {
     const activeSegs = detectedSegments.filter(s => s.isActive);
-    if (!rawFile || !activeSegs.length || isProcessing) {
-      log("プレビュー生成ができません（ファイル未選択 or セグメントなし or 処理中）");
+    if (!rawFile || !activeSegs.length) {
+      log('アクティブなセグメントがありません。');
       return;
     }
 
+    if (!ffmpeg) await initFFmpeg();
+
     isProcessing = true;
-    smoothPreviewBtn.disabled = true;
-    exportStatus.innerText = "プレビュー用の動画を生成中...";
-    exportProgress.style.width = "0%";
-    log("低画質プレビュー動画を生成開始...");
+    exportProgress.style.width = '0%';
 
     try {
-      if (!ffmpeg) {
-        await initFFmpeg();
-      }
       const { fetchFile } = FFmpeg;
+      log('低画質なめらかプレビューを生成開始...');
+      ffmpeg.FS('writeFile', 'preview_in.src', await fetchFile(rawFile));
 
-      ffmpeg.FS("writeFile", "preview_in.src", await fetchFile(rawFile));
-
-      let filter = "";
+      let filter = '';
       const segCount = activeSegs.length;
 
       activeSegs.forEach((s, i) => {
@@ -1040,67 +1056,80 @@
         filter += `[0:a]atrim=start=${s.start}:end=${s.end},asetpts=PTS-STARTPTS[a${i}];`;
       });
 
-      const vLabels = activeSegs.map((_, i) => `[v${i}]`).join("");
-      const aLabels = activeSegs.map((_, i) => `[a${i}]`).join("");
+      const vLabels = activeSegs.map((_, i) => `[v${i}]`).join('');
+      const aLabels = activeSegs.map((_, i) => `[a${i}]`).join('');
 
       filter += `${vLabels}concat=n=${segCount}:v=1:a=0[vcat];`;
       filter += `[vcat]scale=640:-2[vout];`;
       filter += `${aLabels}concat=n=${segCount}:v=0:a=1[aout]`;
 
-      const outName = "preview.mp4";
+      const outName = 'preview.mp4';
       const args = [
-        "-i", "preview_in.src",
-        "-filter_complex", filter,
-        "-map", "[vout]",
-        "-map", "[aout]",
-        "-r", "24",
-        "-c:v", "libx264",
-        "-preset", "ultrafast",
-        "-crf", "30",
-        "-c:a", "aac",
+        '-i', 'preview_in.src',
+        '-filter_complex', filter,
+        '-map', '[vout]',
+        '-map', '[aout]',
+        '-r', '24',
+        '-c:v', 'libx264',
+        '-preset', 'ultrafast',
+        '-crf', '30',
+        '-c:a', 'aac',
         outName
       ];
 
       await ffmpeg.run(...args);
 
-      const data = ffmpeg.FS("readFile", outName);
-
-      ffmpeg.FS("unlink", "preview_in.src");
-      ffmpeg.FS("unlink", outName);
+      const data = ffmpeg.FS('readFile', outName);
+      ffmpeg.FS('unlink', 'preview_in.src');
+      ffmpeg.FS('unlink', outName);
 
       if (previewUrl) {
         URL.revokeObjectURL(previewUrl);
       }
 
       previewUrl = URL.createObjectURL(
-        new Blob([data.buffer], { type: "video/mp4" })
+        new Blob([data.buffer], { type: 'video/mp4' })
       );
 
-      // カット後プレビューに切り替え（自動再生はせず、トグルボタンで再生）
+      // プレイヤーをカット後プレビューに切り替え
       previewPlayer.src = previewUrl;
       previewPlayer.currentTime = 0;
-
-      hasSmoothPreview = true;
       isCutPreviewPlaying = false;
 
+      hasSmoothPreview = true;
       cutPreviewToggleBtn.style.display = 'inline-flex';
       cutPreviewToggleBtn.disabled = false;
       updateCutPreviewButtonUI();
 
-      log("低画質プレビュー動画の生成が完了しました");
-      exportStatus.innerText = "プレビュー動画が生成されました（低画質・カット後）";
-      exportProgress.style.width = "100%";
+      log('低画質なめらかプレビューの生成が完了しました');
     } catch (e) {
       console.error(e);
-      log("プレビュー生成エラー: " + e.message);
-      exportStatus.innerText = "プレビュー生成中にエラーが発生しました";
-      exportProgress.style.width = "0%";
+      log('プレビュー生成エラー: ' + e.message);
+      exportStatus.innerText = 'プレビュー生成中にエラーが発生しました。';
     } finally {
       isProcessing = false;
-      smoothPreviewBtn.disabled = false;
-      setTimeout(() => {
-        exportProgress.style.width = "0%";
-      }, 500);
+      exportProgress.style.width = '0%';
+    }
+  }
+
+  // 「なめらかプレビュー生成 / 再生成」ボタン
+  smoothPreviewBtn.addEventListener('click', async () => {
+    if (!audioBuffer || !detectedSegments.some(s => s.isActive)) {
+      log('プレビュー生成ができません（解析が完了していないか、セグメントがありません）');
+      return;
+    }
+    if (isProcessing) return;
+
+    setControlsLocked(true);
+    exportStatus.innerText = 'なめらかプレビューを再生成中...';
+    exportProgress.style.width = '0%';
+
+    try {
+      await generateSmoothPreview();
+      exportStatus.innerText = 'なめらかプレビューを再生成しました。';
+    } finally {
+      setControlsLocked(false);
+      exportProgress.style.width = '0%';
     }
   });
 
@@ -1124,10 +1153,9 @@
     }
   }
 
-  // カット後プレビュー再生 / 停止トグル
+  // 再生 / 停止トグル
   cutPreviewToggleBtn.addEventListener('click', () => {
     if (!hasSmoothPreview || cutPreviewToggleBtn.disabled) return;
-
     if (previewPlayer.paused) {
       previewPlayer.play();
       isCutPreviewPlaying = true;
@@ -1138,36 +1166,50 @@
     updateCutPreviewButtonUI();
   });
 
+  // 再生終了時にボタン表示を戻す
+  previewPlayer.addEventListener('ended', () => {
+    if (isCutPreviewPlaying) {
+      isCutPreviewPlaying = false;
+      updateCutPreviewButtonUI();
+    }
+  });
+
   // --- Export Handlers ---
   cancelBtn.addEventListener('click', () => {
-    location.reload(); 
+    location.reload();
   });
 
   exportBtn.addEventListener('click', async () => {
+    const activeSegs = detectedSegments.filter(s => s.isActive);
+    if (!rawFile || !activeSegs.length || isProcessing) return;
+
     isProcessing = true;
     exportBtn.disabled = true;
     cancelBtn.style.display = 'inline-flex';
-    exportStatus.innerText = "準備中...";
-    
-    const format = exportFormat.value;
-    const activeSegs = detectedSegments.filter(s => s.isActive);
+    exportStatus.innerText = '準備中...';
+    exportProgress.style.width = '0%';
 
-    if(format === 'xml') {
+    const format = exportFormat.value;
+
+    if (format === 'xml') {
       downloadXML(activeSegs);
       isProcessing = false;
       exportBtn.disabled = false;
       cancelBtn.style.display = 'none';
-      exportStatus.innerText = "XML書き出し完了";
+      exportStatus.innerText = 'XML書き出し完了';
+      exportProgress.style.width = '0%';
       return;
     }
 
-    if(!ffmpeg) await initFFmpeg();
+    if (!ffmpeg) await initFFmpeg();
+
     try {
       const { fetchFile } = FFmpeg;
       ffmpeg.FS('writeFile', 'in.src', await fetchFile(rawFile));
-      
-      let filter = ""; let maps = "";
-      activeSegs.forEach((s,i) => {
+
+      let filter = '';
+      let maps = '';
+      activeSegs.forEach((s, i) => {
         filter += `[0:v]trim=${s.start}:${s.end},setpts=PTS-STARTPTS[v${i}];`;
         filter += `[0:a]atrim=${s.start}:${s.end},asetpts=PTS-STARTPTS[a${i}];`;
         maps += `[v${i}][a${i}]`;
@@ -1176,86 +1218,90 @@
 
       let outName = `output.${format === 'audio' ? 'm4a' : 'mp4'}`;
       let args = ['-i', 'in.src', '-filter_complex', filter, '-map', '[out]'];
-      
-      if(format === 'audio') {
-         filter = ""; maps = "";
-         activeSegs.forEach((s,i) => {
-            filter += `[0:a]atrim=${s.start}:${s.end},asetpts=PTS-STARTPTS[a${i}];`;
-            maps += `[a${i}]`;
-         });
-         filter += `${maps}concat=n=${activeSegs.length}:v=0:a=1[outa]`;
-         args = ['-i', 'in.src', '-filter_complex', filter, '-map', '[outa]', '-c:a', 'aac', outName];
+
+      if (format === 'audio') {
+        filter = '';
+        maps = '';
+        activeSegs.forEach((s, i) => {
+          filter += `[0:a]atrim=${s.start}:${s.end},asetpts=PTS-STARTPTS[a${i}];`;
+          maps += `[a${i}]`;
+        });
+        filter += `${maps}concat=n=${activeSegs.length}:v=0:a=1[outa]`;
+        args = ['-i', 'in.src', '-filter_complex', filter, '-map', '[outa]', '-c:a', 'aac', outName];
       } else {
-         args.push('-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23', '-c:a', 'aac', outName);
+        args.push('-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23', '-c:a', 'aac', outName);
       }
 
       log(`エンコード開始 (${format})...`);
       await ffmpeg.run(...args);
-      
-      exportStatus.innerText = "保存中...";
+
+      exportStatus.innerText = '保存中...';
       const data = ffmpeg.FS('readFile', outName);
-      const blob = new Blob([data.buffer], {type: format==='audio'?'audio/mp4':'video/mp4'});
+      const blob = new Blob([data.buffer], { type: format === 'audio' ? 'audio/mp4' : 'video/mp4' });
       const url = URL.createObjectURL(blob);
-      
+
       downloadBtn.href = url;
-      downloadBtn.download = `cut_${rawFile.name}.${format==='audio'?'m4a':'mp4'}`;
+      downloadBtn.download = `cut_${rawFile.name}.${format === 'audio' ? 'm4a' : 'mp4'}`;
       downloadBtn.click();
       downloadBtn.style.display = 'block';
-      
-      ffmpeg.FS('unlink', 'in.src'); ffmpeg.FS('unlink', outName);
-      log("完了");
-      
-    } catch(e) {
-      console.error(e); exportStatus.innerText = "エラー発生"; log(e.message);
+
+      ffmpeg.FS('unlink', 'in.src');
+      ffmpeg.FS('unlink', outName);
+      log('書き出し完了');
+    } catch (e) {
+      console.error(e);
+      exportStatus.innerText = 'エラー発生';
+      log(e.message);
     } finally {
       isProcessing = false;
       exportBtn.disabled = false;
       cancelBtn.style.display = 'none';
+      exportProgress.style.width = '0%';
     }
   });
 
   // XML / EDL Generator
   function downloadXML(segments) {
     let edl = `TITLE: CUT_PROJECT\nFCM: NON-DROP FRAME\n`;
-    
     let content = edl;
     let recIn = 0;
-    
+
+    const toTC = (t) => {
+      const h = Math.floor(t / 3600); t %= 3600;
+      const m = Math.floor(t / 60); t %= 60;
+      const sec = Math.floor(t);
+      const ff = Math.floor((t - sec) * 30);
+      return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}:${String(ff).padStart(2, '0')}`;
+    };
+
     segments.forEach((s, i) => {
-      const id = (i+1).toString().padStart(3, '0');
+      const id = (i + 1).toString().padStart(3, '0');
       const srcInSec = s.start;
       const srcOutSec = s.end;
       const dur = srcOutSec - srcInSec;
-      
-      const toTC = (t) => {
-        const h = Math.floor(t/3600); t%=3600;
-        const m = Math.floor(t/60); t%=60;
-        const sec = Math.floor(t);
-        const ff = Math.floor((t-sec)*30);
-        return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}:${String(ff).padStart(2,'0')}`;
-      };
-      
-      content += `${id}  AX       V     C        ${toTC(srcInSec)} ${toTC(srcOutSec)} ${toTC(recIn)} ${toTC(recIn+dur)}\n`;
-      content += `${id}  AX       A     C        ${toTC(srcInSec)} ${toTC(srcOutSec)} ${toTC(recIn)} ${toTC(recIn+dur)}\n`;
+
+      content += `${id}  AX       V     C        ${toTC(srcInSec)} ${toTC(srcOutSec)} ${toTC(recIn)} ${toTC(recIn + dur)}\n`;
+      content += `${id}  AX       A     C        ${toTC(srcInSec)} ${toTC(srcOutSec)} ${toTC(recIn)} ${toTC(recIn + dur)}\n`;
       recIn += dur;
     });
 
-    const blob = new Blob([content], {type: 'text/plain'});
+    const blob = new Blob([content], { type: 'text/plain' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `cut_project.edl`;
+    a.download = 'cut_project.edl';
     a.click();
-    log("EDLファイルをダウンロードしました");
+    log('EDLファイルをダウンロードしました');
   }
 
-  // Seek
+  // Waveformクリックでシーク（解析済みのとき）
   waveformCanvas.addEventListener('click', (e) => {
-    if(!audioBuffer) return;
+    if (!audioBuffer) return;
     const r = waveformCanvas.getBoundingClientRect();
     const ratio = (e.clientX - r.left) / r.width;
     previewPlayer.currentTime = ratio * audioBuffer.duration;
   });
-  </script>
+</script>
+
 </body>
 </html>
