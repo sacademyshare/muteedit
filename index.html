@@ -956,7 +956,7 @@
 
   stopPreviewBtn.addEventListener('click', stopPreview);
 
-    // --- Smooth Preview (低画質なめらかプレビュー) ---
+  // --- Smooth Preview (低画質なめらかプレビュー) ---
   smoothPreviewBtn.addEventListener('click', async () => {
     const activeSegs = detectedSegments.filter(s => s.isActive);
     if (!rawFile || !activeSegs.length || isProcessing) {
@@ -979,40 +979,55 @@
       // 入力ファイルを書き込み（exportと区別するため別ファイル名）
       ffmpeg.FS("writeFile", "preview_in.src", await fetchFile(rawFile));
 
-      // カット区間用の filter_complex を作成（動画＋音声を concat）
+      // カット区間用の filter_complex を作成
+      //   - まず各セグメントごとに vX / aX を作る
+      //   - 映像: vX を concat → [vcat] → scale → [vout]
+      //   - 音声: aX を concat → [aout]
       let filter = "";
-      let maps = "";
+      const segCount = activeSegs.length;
+
       activeSegs.forEach((s, i) => {
-        filter += `[0:v]trim=${s.start}:${s.end},setpts=PTS-STARTPTS[v${i}];`;
-        filter += `[0:a]atrim=${s.start}:${s.end},asetpts=PTS-STARTPTS[a${i}];`;
-        maps += `[v${i}][a${i}]`;
+        filter += `[0:v]trim=start=${s.start}:end=${s.end},setpts=PTS-STARTPTS[v${i}];`;
+        filter += `[0:a]atrim=start=${s.start}:end=${s.end},asetpts=PTS-STARTPTS[a${i}];`;
       });
-      filter += `${maps}concat=n=${activeSegs.length}:v=1:a=1[out]`;
+
+      const vLabels = activeSegs.map((_, i) => `[v${i}]`).join("");
+      const aLabels = activeSegs.map((_, i) => `[a${i}]`).join("");
+
+      // 映像 concat → scale → [vout]
+      filter += `${vLabels}concat=n=${segCount}:v=1:a=0[vcat];`;
+      filter += `[vcat]scale=640:-2[vout];`;
+      // 音声 concat → [aout]
+      filter += `${aLabels}concat=n=${segCount}:v=0:a=1[aout]`;
 
       const outName = "preview.mp4";
       const args = [
         "-i", "preview_in.src",
         "-filter_complex", filter,
-        "-map", "[out]",
-        "-vf", "scale=640:-2",      // 解像度を落とす
-        "-r", "24",                 // フレームレートも少し落とす
+        "-map", "[vout]",
+        "-map", "[aout]",
+        "-r", "24",
         "-c:v", "libx264",
-        "-preset", "ultrafast",     // 速度重視
-        "-crf", "30",               // 画質より軽さ優先
+        "-preset", "ultrafast",  // 速度優先
+        "-crf", "30",            // 画質より軽さ
         "-c:a", "aac",
         outName
       ];
 
       await ffmpeg.run(...args);
 
+      // 出力ファイルを読む
       const data = ffmpeg.FS("readFile", outName);
+
+      // 一時ファイル削除
       ffmpeg.FS("unlink", "preview_in.src");
       ffmpeg.FS("unlink", outName);
 
-      // 既存のプレビューURLがあれば解放
+      // 既存プレビューURLがあれば解放
       if (previewUrl) {
         URL.revokeObjectURL(previewUrl);
       }
+
       previewUrl = URL.createObjectURL(
         new Blob([data.buffer], { type: "video/mp4" })
       );
@@ -1039,6 +1054,7 @@
       }, 500);
     }
   });
+
 
   // イベント駆動のプレビュー制御
   previewPlayer.addEventListener('timeupdate', () => {
