@@ -591,7 +591,7 @@
         <!-- 最初はこのボタンのみ表示 -->
         <button id="smoothPreviewBtn" class="btn btn-secondary">
           <svg class="icon icon-btn" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
-          なめらかプレビュー生成
+          軽量プレビュー生成
         </button>
         <!-- 生成後に表示される、再生 / 停止トグルボタン -->
         <button id="cutPreviewToggleBtn" class="btn btn-secondary cut-preview-btn" style="display:none;">
@@ -721,7 +721,7 @@
   let hasSmoothPreview = false;
   let isCutPreviewPlaying = false;
   let isProcessing = false;         // FFmpeg処理中フラグ（プレビュー / エクスポート共有）
-  let previewUrl = null;            // カット後なめらかプレビュー用の URL
+  let previewUrl = null;            // カット後軽量プレビュー用の URL
 
   const log = (msg) => {
     const t = new Date().toLocaleTimeString();
@@ -757,7 +757,7 @@
       if (audioBuffer) {
         detectSilence();
         if (hasSmoothPreview) {
-          exportStatus.innerText = 'パラメータが変更されました。なめらかプレビューを再生成してください。';
+          exportStatus.innerText = 'パラメータが変更されました。軽量プレビューを再生成してください。';
         }
       }
     });
@@ -824,7 +824,7 @@
     setControlsLocked(false);
   });
 
-  // --- 音量解析 ＋ 初回なめらかプレビュー生成 ---
+  // --- 音量解析 ＋ 初回軽量プレビュー生成 ---
   analyzeBtn.addEventListener('click', async () => {
     if (!rawFile) return;
     if (isProcessing) return;
@@ -848,12 +848,12 @@
       }
 
       detectSilence();
-      log('解析完了。なめらかプレビューを生成します...');
-      exportStatus.innerText = 'なめらかプレビューを生成中...';
+      log('解析完了。軽量プレビューを生成します...');
+      exportStatus.innerText = '軽量プレビューを生成中...';
 
       await generateSmoothPreview();   // 解析完了と同時にプレビュー生成
 
-      exportStatus.innerText = 'なめらかプレビューが生成されました。';
+      exportStatus.innerText = '軽量プレビューが生成されました。';
     } catch (e) {
       console.error(e);
       log('解析 / プレビュー生成エラー: ' + e.message);
@@ -1030,7 +1030,7 @@
     });
   }
 
-  // --- なめらかプレビュー生成（カット後、低画質） ---
+  // --- 軽量プレビュー生成（カット後、低画質） ---
   async function generateSmoothPreview() {
     const activeSegs = detectedSegments.filter(s => s.isActive);
     if (!rawFile || !activeSegs.length) {
@@ -1045,7 +1045,7 @@
 
     try {
       const { fetchFile } = FFmpeg;
-      log('低画質なめらかプレビューを生成開始...');
+      log('低画質軽量プレビューを生成開始...');
       ffmpeg.FS('writeFile', 'preview_in.src', await fetchFile(rawFile));
 
       let filter = '';
@@ -1101,7 +1101,7 @@
       cutPreviewToggleBtn.disabled = false;
       updateCutPreviewButtonUI();
 
-      log('低画質なめらかプレビューの生成が完了しました');
+      log('低画質軽量プレビューの生成が完了しました');
     } catch (e) {
       console.error(e);
       log('プレビュー生成エラー: ' + e.message);
@@ -1112,7 +1112,7 @@
     }
   }
 
-  // 「なめらかプレビュー生成 / 再生成」ボタン
+  // 「軽量プレビュー生成 / 再生成」ボタン
   smoothPreviewBtn.addEventListener('click', async () => {
     if (!audioBuffer || !detectedSegments.some(s => s.isActive)) {
       log('プレビュー生成ができません（解析が完了していないか、セグメントがありません）');
@@ -1121,12 +1121,12 @@
     if (isProcessing) return;
 
     setControlsLocked(true);
-    exportStatus.innerText = 'なめらかプレビューを再生成中...';
+    exportStatus.innerText = '軽量プレビューを再生成中...';
     exportProgress.style.width = '0%';
 
     try {
       await generateSmoothPreview();
-      exportStatus.innerText = 'なめらかプレビューを再生成しました。';
+      exportStatus.innerText = '軽量プレビューを再生成しました。';
     } finally {
       setControlsLocked(false);
       exportProgress.style.width = '0%';
