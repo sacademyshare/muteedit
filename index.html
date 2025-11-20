@@ -552,7 +552,8 @@
     <div class="panel-right">
       
       <div class="preview-container">
-        <video id="previewPlayer" playsinline controls></video>
+        <video id="previewPlayer" playsinline controls preload="auto"></video>
+
       </div>
 
       <div>
@@ -698,14 +699,16 @@
   const sMinDur = document.getElementById('minDuration');
   const sPadding = document.getElementById('padding');
 
-  // State
+   // State
   let ffmpeg = null;
   let audioBuffer = null;
   let rawFile = null;
   let detectedSegments = []; // {start, end, isActive}
   let isPreviewingCuts = false;
-  let previewTimeout = null;
+  let previewSegments = [];
+  let previewIndex = 0;
   let isProcessing = false; // Lock for export
+
 
   const log = (msg) => {
     const t = new Date().toLocaleTimeString();
@@ -920,55 +923,67 @@
     });
   }
 
-  // Preview Logic
+    // Preview Logic
   previewCutBtn.addEventListener('click', () => {
-    if(!detectedSegments.some(s=>s.isActive)) return;
+    const activeSegs = detectedSegments.filter(s => s.isActive);
+    if (!activeSegs.length) return;
+
+    previewSegments = activeSegs;
+    previewIndex = 0;
     isPreviewingCuts = true;
-    previewCutBtn.style.display = 'none'; stopPreviewBtn.style.display = 'inline-flex';
-    
-    // Jump to first active segment
-    const first = detectedSegments.find(s => s.isActive);
-    if(first) previewPlayer.currentTime = first.start;
-    previewPlayer.play(); checkPlayHead();
+
+    previewCutBtn.style.display = 'none';
+    stopPreviewBtn.style.display = 'inline-flex';
+
+    previewPlayer.currentTime = previewSegments[0].start;
+    previewPlayer.play();
   });
 
-  stopPreviewBtn.addEventListener('click', () => {
-    isPreviewingCuts = false; previewPlayer.pause();
-    stopPreviewBtn.style.display = 'none'; previewCutBtn.style.display = 'inline-flex';
-    clearTimeout(previewTimeout);
-  });
+  function stopPreview() {
+    isPreviewingCuts = false;
+    previewPlayer.pause();
+    stopPreviewBtn.style.display = 'none';
+    previewCutBtn.style.display = 'inline-flex';
+  }
 
-  function checkPlayHead() {
-    if(!isPreviewingCuts || previewPlayer.paused) return;
+  stopPreviewBtn.addEventListener('click', stopPreview);
+
+  // イベント駆動のプレビュー制御
+  previewPlayer.addEventListener('timeupdate', () => {
+    if (!isPreviewingCuts || !previewSegments.length) return;
+
     const t = previewPlayer.currentTime;
-    
-    // Find current segment index
-    const curIdx = detectedSegments.findIndex(s => t >= s.start && t < s.end);
-    
-    if(curIdx !== -1) {
-      // Inside a segment
-      if(!detectedSegments[curIdx].isActive) {
-         // If current is inactive, jump forward immediately
-         jumpToNextActive(t);
-      } else if(detectedSegments[curIdx].end - t < 0.1) {
-         // End of active segment, jump
-         jumpToNextActive(t);
-      }
-    } else {
-      // Outside any segment (gap)
-      jumpToNextActive(t);
-    }
-    previewTimeout = setTimeout(checkPlayHead, 30);
-  }
+    let seg = previewSegments[previewIndex];
 
-  function jumpToNextActive(currentTime) {
-    const next = detectedSegments.find(s => s.isActive && s.start > currentTime);
-    if(next) {
-      previewPlayer.currentTime = next.start;
-    } else {
-      stopPreviewBtn.click(); // End
+    // 手動シークなどでセグメント外に出た場合の補正
+    if (t < seg.start - 0.1 || t > seg.end + 0.1) {
+      const idx = previewSegments.findIndex(s => t >= s.start && t < s.end);
+      if (idx !== -1) {
+        previewIndex = idx;
+        seg = previewSegments[previewIndex];
+      } else {
+        // どのセグメントにもいない → 次のアクティブセグメントを探す
+        const nextIdx = previewSegments.findIndex(s => s.start > t);
+        if (nextIdx !== -1) {
+          previewIndex = nextIdx;
+          previewPlayer.currentTime = previewSegments[previewIndex].start;
+        } else {
+          stopPreview();
+        }
+        return;
+      }
     }
-  }
+
+    // セグメント末尾に到達したら次へ
+    if (t >= seg.end - 0.05) {
+      previewIndex++;
+      if (previewIndex >= previewSegments.length) {
+        stopPreview();
+      } else {
+        previewPlayer.currentTime = previewSegments[previewIndex].start;
+      }
+    }
+  });
 
   // --- Export Handlers ---
   cancelBtn.addEventListener('click', () => {
