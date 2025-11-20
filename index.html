@@ -177,7 +177,6 @@
         display: contents;
       }
 
-      /* 1. Top: File Input */
       .drop-zone {
         order: 1;
         margin: 16px 16px 10px 16px !important;
@@ -190,7 +189,6 @@
       .drop-zone-text { margin: 0 !important; font-size: 13px; }
       .drop-zone div:last-child { display: none; }
 
-      /* 2. Preview */
       .preview-container {
         order: 2;
         margin: 0 16px 16px 16px !important;
@@ -198,7 +196,6 @@
         width: calc(100% - 32px) !important;
       }
 
-      /* 3-8. Controls & Timeline */
       .panel-right > div, .panel-left > div {
         order: 10;
         margin: 0 16px 16px 16px;
@@ -207,12 +204,11 @@
       
       .panel-right > div:has(#waveformCanvas) { order: 3; }
       .segment-list-container { order: 4; }
-      .panel-right > div:has(#previewCutBtn) { order: 5; }
+      .panel-right > div:has(#smoothPreviewBtn) { order: 5; }
       .stats-card { order: 6; }
       .control-group { order: 7; }
       .log-console { order: 8; }
 
-      /* 9. Export */
       .export-section {
         order: 100;
         margin: 16px 16px 40px 16px !important;
@@ -227,7 +223,6 @@
     }
     h2 svg { color: var(--primary); width: 18px; height: 18px; }
 
-    /* --- Components --- */
     .glass-card {
       background: var(--glass-bg);
       border: 1px solid var(--glass-border);
@@ -514,10 +509,12 @@
         <div class="slider-item">
           <div class="slider-header">
             <span>しきい値 (Threshold)</span>
-            <span class="label-val" id="thresholdVal">-30 dB</span>
+            <!-- ★ 初期表示を -48 dB に変更 -->
+            <span class="label-val" id="thresholdVal">-48 dB</span>
           </div>
           <div class="slider-desc">この値より小さい音を「無音」とみなしてカットします。</div>
-          <input type="range" id="threshold" min="-60" max="-10" value="-30" step="1">
+          <!-- ★ デフォルト値を -48 に変更 -->
+          <input type="range" id="threshold" min="-60" max="-10" value="-48" step="1">
         </div>
 
         <div class="slider-item">
@@ -553,7 +550,6 @@
       
       <div class="preview-container">
         <video id="previewPlayer" playsinline controls preload="auto"></video>
-
       </div>
 
       <div>
@@ -577,21 +573,17 @@
       </div>
 
       <div style="display:flex; gap:16px; flex-wrap:wrap;">
-  <button id="previewCutBtn" class="btn btn-secondary" disabled>
-    <svg class="icon icon-btn" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
-    カット後のプレビュー
-  </button>
-  <button id="stopPreviewBtn" class="btn btn-secondary" style="display:none; color:#ff6b6b;">
-    <svg class="icon icon-btn" viewBox="0 0 24 24"><path d="M6 6h12v12H6z"/></svg>
-    停止
-  </button>
-  <!-- 追加：低画質なめらかプレビュー生成 -->
-  <button id="smoothPreviewBtn" class="btn btn-secondary">
-    <svg class="icon icon-btn" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
-    なめらかプレビュー生成
-  </button>
-</div>
-
+        <!-- ★ 最初に表示されるのは「なめらかプレビュー生成」のみ -->
+        <button id="smoothPreviewBtn" class="btn btn-secondary">
+          <svg class="icon icon-btn" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+          なめらかプレビュー生成
+        </button>
+        <!-- ★ 生成完了後に表示される再生/停止トグルボタン -->
+        <button id="cutPreviewToggleBtn" class="btn btn-secondary" style="display:none;">
+          <svg class="icon icon-btn" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+          カット後のプレビュー再生
+        </button>
+      </div>
 
       <!-- Export Section -->
       <div class="export-section">
@@ -687,9 +679,8 @@
   const exportBtn = document.getElementById('exportBtn');
   const cancelBtn = document.getElementById('cancelBtn');
   const exportFormat = document.getElementById('exportFormat');
-  const previewCutBtn = document.getElementById('previewCutBtn');
-  const stopPreviewBtn = document.getElementById('stopPreviewBtn');
-  const smoothPreviewBtn = document.getElementById('smoothPreviewBtn'); // ★追加
+  const smoothPreviewBtn = document.getElementById('smoothPreviewBtn');
+  const cutPreviewToggleBtn = document.getElementById('cutPreviewToggleBtn');
   const downloadBtn = document.getElementById('downloadBtn');
   const exportProgress = document.getElementById('exportProgress');
   const exportStatus = document.getElementById('exportStatus');
@@ -706,19 +697,16 @@
   const sMinDur = document.getElementById('minDuration');
   const sPadding = document.getElementById('padding');
 
-   // State
+  // State
   let ffmpeg = null;
   let audioBuffer = null;
-  let rawFile = null;           // ★ オリジナル（解析・書き出し用）として継続利用
-  let rawFileOriginal = null;   // ★ 明示的にオリジナルを保持（将来拡張用）
+  let rawFile = null;
+  let rawFileOriginal = null;
   let detectedSegments = []; // {start, end, isActive}
-  let isPreviewingCuts = false;
-  let previewTimeout = null;
-  let isProcessing = false; // Lock for export
-  let previewProxyUrl = null;   // ★ 低解像度プレビュー用の URL
-
-
-
+  let isProcessing = false;
+  let previewProxyUrl = null;   // 低解像度プレビュー用オリジナル
+  let previewUrl = null;        // カット済みなめらかプレビュー
+  let hasPreviewVideo = false;  // カット後プレビューが生成済みかどうか
 
   const log = (msg) => {
     const t = new Date().toLocaleTimeString();
@@ -761,16 +749,23 @@
     const file = e.target.files[0];
     if (!file) return;
 
-    rawFileOriginal = file;       // ★ 明示的にオリジナルを保持
-    rawFile = file;               // ★ 解析・書き出し用として従来通り利用
+    rawFileOriginal = file;
+    rawFile = file;
 
-    // ひとまずオリジナルでプレビュー（後でプロキシができたら差し替える）
+    // オリジナルで一旦プレビュー
     previewPlayer.src = URL.createObjectURL(file);
+
+    // カット済みプレビュー関連をリセット
+    if (previewUrl) {
+      URL.revokeObjectURL(previewUrl);
+      previewUrl = null;
+    }
+    hasPreviewVideo = false;
+    cutPreviewToggleBtn.style.display = 'none';
 
     audioBuffer = null;
     detectedSegments = [];
     exportBtn.disabled = true;
-    previewCutBtn.disabled = true;
     downloadBtn.style.display = 'none';
     analyzeBtn.disabled = false;
     statOriginal.innerText = "--:--";
@@ -782,10 +777,9 @@
     document.querySelector('.drop-zone-text').innerText = file.name;
     log(`File Selected: ${file.name}`);
 
-    // ★ ここでバックグラウンドで低解像度プロキシを作成
+    // 低解像度プロキシをバックグラウンドで作成
     createPreviewProxy(file);
   });
-
 
   // Analyze
   analyzeBtn.addEventListener('click', async () => {
@@ -807,7 +801,7 @@
     finally { analyzeBtn.disabled = false; }
   });
 
-    // オリジナルから「プレビュー用の低解像度動画」を一度だけ作る
+  // オリジナルから「プレビュー用の低解像度動画」を一度だけ作る
   async function createPreviewProxy(file) {
     try {
       if (!ffmpeg) {
@@ -817,17 +811,16 @@
 
       log("プレビュー用の軽量動画を作成中...");
 
-      // 入力ファイルを書き込み
       ffmpeg.FS("writeFile", "proxy_in.src", await fetchFile(file));
 
       const outName = "proxy_preview.mp4";
       const args = [
         "-i", "proxy_in.src",
-        "-vf", "scale=640:-2",    // 解像度ダウン（幅640px）
-        "-r", "24",               // フレームレートも少し落とす
+        "-vf", "scale=640:-2",
+        "-r", "24",
         "-c:v", "libx264",
-        "-preset", "ultrafast",   // 速度優先
-        "-crf", "30",             // 画質より軽さ
+        "-preset", "ultrafast",
+        "-crf", "30",
         "-c:a", "aac",
         "-b:a", "96k",
         outName
@@ -837,11 +830,9 @@
 
       const data = ffmpeg.FS("readFile", outName);
 
-      // 一時ファイル削除
       ffmpeg.FS("unlink", "proxy_in.src");
       ffmpeg.FS("unlink", outName);
 
-      // 既存のプロキシURLがあれば解放
       if (previewProxyUrl) {
         URL.revokeObjectURL(previewProxyUrl);
       }
@@ -850,13 +841,11 @@
         new Blob([data.buffer], { type: "video/mp4" })
       );
 
-      // プレビューはプロキシに差し替え（時間軸は同じなので currentTime はそのままでOK）
       const currentTime = previewPlayer.currentTime || 0;
       previewPlayer.src = previewProxyUrl;
       previewPlayer.currentTime = currentTime;
       log("プレビュー用軽量動画に切り替えました");
     } catch (e) {
-      // プロキシ生成に失敗した場合はオリジナルのまま
       console.error(e);
       log("プレビュー用動画作成に失敗したため、オリジナルを使用します: " + e.message);
     }
@@ -910,7 +899,6 @@
       if(cur.end - cur.start >= minDur) merged.push(cur);
     }
     
-    // Init segments with Active state
     detectedSegments = merged.map(s => ({
       start: Math.max(0, s.start),
       end: Math.min(audioBuffer.duration, s.end),
@@ -937,7 +925,6 @@
     
     const valid = detectedSegments.some(s => s.isActive);
     exportBtn.disabled = !valid;
-    previewCutBtn.disabled = !valid;
   }
 
   function drawWaveform(data) {
@@ -952,7 +939,6 @@
     const scale = (h/2)*0.9 / (maxAmp||1);
     const step = Math.ceil(data.length/w);
 
-    // Draw Base Wave
     ctx.beginPath(); ctx.strokeStyle='#444'; ctx.lineWidth=1;
     for(let x=0; x<w; x++) {
       const val = data[x*step]||0; const y=val*scale;
@@ -960,17 +946,14 @@
     }
     ctx.stroke();
 
-    // Draw Segments (Green for Active, Red/Gray for Inactive)
     const totalSec = data.length / audioBuffer.sampleRate;
     detectedSegments.forEach(s => {
       const x = (s.start/totalSec)*w;
       const wid = ((s.end-s.start)/totalSec)*w;
-      // Active=Green, Inactive=Dark Red
       ctx.fillStyle = s.isActive ? 'rgba(141,194,31,0.3)' : 'rgba(255,50,50,0.1)';
       ctx.fillRect(x,0,wid,h);
     });
 
-    // Threshold Line
     const thVal = parseFloat(sThreshold.value);
     const ratio = (thVal - (-60)) / 50;
     const ly = h/2 - (h/2 * ratio);
@@ -997,30 +980,21 @@
     });
   }
 
-    // Preview Logic
-  previewCutBtn.addEventListener('click', () => {
-    const activeSegs = detectedSegments.filter(s => s.isActive);
-    if (!activeSegs.length) return;
-
-    previewSegments = activeSegs;
-    previewIndex = 0;
-    isPreviewingCuts = true;
-
-    previewCutBtn.style.display = 'none';
-    stopPreviewBtn.style.display = 'inline-flex';
-
-    previewPlayer.currentTime = previewSegments[0].start;
-    previewPlayer.play();
-  });
-
-  function stopPreview() {
-    isPreviewingCuts = false;
-    previewPlayer.pause();
-    stopPreviewBtn.style.display = 'none';
-    previewCutBtn.style.display = 'inline-flex';
+  // --- カット後プレビュー再生ボタンの表示内容を更新 ---
+  function updateCutPreviewButtonState(isPlaying) {
+    if (!hasPreviewVideo) return;
+    if (isPlaying) {
+      cutPreviewToggleBtn.innerHTML = `
+        <svg class="icon icon-btn" viewBox="0 0 24 24"><path d="M6 6h12v12H6z"/></svg>
+        カット後のプレビュー停止
+      `;
+    } else {
+      cutPreviewToggleBtn.innerHTML = `
+        <svg class="icon icon-btn" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+        カット後のプレビュー再生
+      `;
+    }
   }
-
-  stopPreviewBtn.addEventListener('click', stopPreview);
 
   // --- Smooth Preview (低画質なめらかプレビュー) ---
   smoothPreviewBtn.addEventListener('click', async () => {
@@ -1042,13 +1016,8 @@
       }
       const { fetchFile } = FFmpeg;
 
-      // 入力ファイルを書き込み（exportと区別するため別ファイル名）
       ffmpeg.FS("writeFile", "preview_in.src", await fetchFile(rawFile));
 
-      // カット区間用の filter_complex を作成
-      //   - まず各セグメントごとに vX / aX を作る
-      //   - 映像: vX を concat → [vcat] → scale → [vout]
-      //   - 音声: aX を concat → [aout]
       let filter = "";
       const segCount = activeSegs.length;
 
@@ -1060,10 +1029,8 @@
       const vLabels = activeSegs.map((_, i) => `[v${i}]`).join("");
       const aLabels = activeSegs.map((_, i) => `[a${i}]`).join("");
 
-      // 映像 concat → scale → [vout]
       filter += `${vLabels}concat=n=${segCount}:v=1:a=0[vcat];`;
       filter += `[vcat]scale=640:-2[vout];`;
-      // 音声 concat → [aout]
       filter += `${aLabels}concat=n=${segCount}:v=0:a=1[aout]`;
 
       const outName = "preview.mp4";
@@ -1074,22 +1041,19 @@
         "-map", "[aout]",
         "-r", "24",
         "-c:v", "libx264",
-        "-preset", "ultrafast",  // 速度優先
-        "-crf", "30",            // 画質より軽さ
+        "-preset", "ultrafast",
+        "-crf", "30",
         "-c:a", "aac",
         outName
       ];
 
       await ffmpeg.run(...args);
 
-      // 出力ファイルを読む
       const data = ffmpeg.FS("readFile", outName);
 
-      // 一時ファイル削除
       ffmpeg.FS("unlink", "preview_in.src");
       ffmpeg.FS("unlink", outName);
 
-      // 既存プレビューURLがあれば解放
       if (previewUrl) {
         URL.revokeObjectURL(previewUrl);
       }
@@ -1098,10 +1062,13 @@
         new Blob([data.buffer], { type: "video/mp4" })
       );
 
-      // プレイヤーにセットして再生
+      // カット済みプレビュー動画をプレイヤーにセット（ここでは再生は開始しない）
       previewPlayer.src = previewUrl;
       previewPlayer.currentTime = 0;
-      previewPlayer.play();
+
+      hasPreviewVideo = true;
+      cutPreviewToggleBtn.style.display = 'inline-flex';
+      updateCutPreviewButtonState(false);
 
       log("低画質プレビュー動画の生成が完了しました");
       exportStatus.innerText = "プレビュー動画が生成されました（低画質）";
@@ -1114,54 +1081,34 @@
     } finally {
       isProcessing = false;
       smoothPreviewBtn.disabled = false;
-      // 次の処理用にバーはリセットしておく
       setTimeout(() => {
         exportProgress.style.width = "0%";
       }, 500);
     }
   });
 
-
-  // イベント駆動のプレビュー制御
-  previewPlayer.addEventListener('timeupdate', () => {
-    if (!isPreviewingCuts || !previewSegments.length) return;
-
-    const t = previewPlayer.currentTime;
-    let seg = previewSegments[previewIndex];
-
-    // 手動シークなどでセグメント外に出た場合の補正
-    if (t < seg.start - 0.1 || t > seg.end + 0.1) {
-      const idx = previewSegments.findIndex(s => t >= s.start && t < s.end);
-      if (idx !== -1) {
-        previewIndex = idx;
-        seg = previewSegments[previewIndex];
-      } else {
-        // どのセグメントにもいない → 次のアクティブセグメントを探す
-        const nextIdx = previewSegments.findIndex(s => s.start > t);
-        if (nextIdx !== -1) {
-          previewIndex = nextIdx;
-          previewPlayer.currentTime = previewSegments[previewIndex].start;
-        } else {
-          stopPreview();
-        }
-        return;
-      }
+  // カット後プレビュー再生/停止ボタン
+  cutPreviewToggleBtn.addEventListener('click', () => {
+    if (!hasPreviewVideo) return;
+    if (previewPlayer.paused || previewPlayer.ended) {
+      previewPlayer.play();
+      updateCutPreviewButtonState(true);
+    } else {
+      previewPlayer.pause();
+      updateCutPreviewButtonState(false);
     }
+  });
 
-    // セグメント末尾に到達したら次へ
-    if (t >= seg.end - 0.05) {
-      previewIndex++;
-      if (previewIndex >= previewSegments.length) {
-        stopPreview();
-      } else {
-        previewPlayer.currentTime = previewSegments[previewIndex].start;
-      }
-    }
+  // 動画プレイヤー側の再生/停止とも同期させる
+  previewPlayer.addEventListener('play', () => {
+    if (hasPreviewVideo) updateCutPreviewButtonState(true);
+  });
+  previewPlayer.addEventListener('pause', () => {
+    if (hasPreviewVideo) updateCutPreviewButtonState(false);
   });
 
   // --- Export Handlers ---
   cancelBtn.addEventListener('click', () => {
-    // Reset the page logic basically
     location.reload(); 
   });
 
@@ -1183,7 +1130,6 @@
       return;
     }
 
-    // FFmpeg Encoding
     if(!ffmpeg) await initFFmpeg();
     try {
       const { fetchFile } = FFmpeg;
@@ -1201,9 +1147,6 @@
       let args = ['-i', 'in.src', '-filter_complex', filter, '-map', '[out]'];
       
       if(format === 'audio') {
-         // Audio Only: Drop video map, use simple audio concat? 
-         // Actually filter complex above assumes video. Let's simplify for audio only.
-         // Re-build filter for audio only
          filter = ""; maps = "";
          activeSegs.forEach((s,i) => {
             filter += `[0:a]atrim=${s.start}:${s.end},asetpts=PTS-STARTPTS[a${i}];`;
@@ -1212,7 +1155,6 @@
          filter += `${maps}concat=n=${activeSegs.length}:v=0:a=1[outa]`;
          args = ['-i', 'in.src', '-filter_complex', filter, '-map', '[outa]', '-c:a', 'aac', outName];
       } else {
-         // Video
          args.push('-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23', '-c:a', 'aac', outName);
       }
 
@@ -1243,27 +1185,16 @@
 
   // XML / EDL Generator
   function downloadXML(segments) {
-    // CMX 3600 EDL Format (Simple & Compatible)
     let edl = `TITLE: CUT_PROJECT\nFCM: NON-DROP FRAME\n`;
-    // Base Time calculation is tricky without frame rate, using simplified seconds
-    // Better: FCPXML (XML) is safer for non-frame-perfect
-    
-    // Let's do FCPXML 1.9 (Simple)
-    // Need framerate estimate. Default to 30fps or 60fps base.
-    // Actually, basic EDL is safest for "Cuts Only".
-    
-    // Generating a simple CMX3600 EDL
     let content = edl;
     let recIn = 0;
     
     segments.forEach((s, i) => {
       const id = (i+1).toString().padStart(3, '0');
-      // Src In/Out (Seconds)
       const srcInSec = s.start;
       const srcOutSec = s.end;
       const dur = srcOutSec - srcInSec;
       
-      // Helper to convert sec to HH:MM:SS:FF (assume 30fps)
       const toTC = (t) => {
         const h = Math.floor(t/3600); t%=3600;
         const m = Math.floor(t/60); t%=60;
@@ -1286,7 +1217,7 @@
     log("EDLファイルをダウンロードしました");
   }
 
-  // Seek
+  // Seek on waveform
   waveformCanvas.addEventListener('click', (e) => {
     if(!audioBuffer) return;
     const r = waveformCanvas.getBoundingClientRect();
