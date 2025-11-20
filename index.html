@@ -709,12 +709,14 @@
    // State
   let ffmpeg = null;
   let audioBuffer = null;
-  let rawFile = null;
+  let rawFile = null;           // ★ オリジナル（解析・書き出し用）として継続利用
+  let rawFileOriginal = null;   // ★ 明示的にオリジナルを保持（将来拡張用）
   let detectedSegments = []; // {start, end, isActive}
   let isPreviewingCuts = false;
-  let previewTimeout = null; // timeupdate 版にしたなら削除してOK
+  let previewTimeout = null;
   let isProcessing = false; // Lock for export
-  let previewUrl = null;    // ★追加：低画質プレビュー用のURL
+  let previewProxyUrl = null;   // ★ 低解像度プレビュー用の URL
+
 
 
 
@@ -757,9 +759,14 @@
   // Input
   fileInput.addEventListener('change', (e) => {
     const file = e.target.files[0];
-    if(!file) return;
-    rawFile = file;
+    if (!file) return;
+
+    rawFileOriginal = file;       // ★ 明示的にオリジナルを保持
+    rawFile = file;               // ★ 解析・書き出し用として従来通り利用
+
+    // ひとまずオリジナルでプレビュー（後でプロキシができたら差し替える）
     previewPlayer.src = URL.createObjectURL(file);
+
     audioBuffer = null;
     detectedSegments = [];
     exportBtn.disabled = true;
@@ -774,7 +781,11 @@
     ctx.clearRect(0,0,waveformCanvas.width, waveformCanvas.height);
     document.querySelector('.drop-zone-text').innerText = file.name;
     log(`File Selected: ${file.name}`);
+
+    // ★ ここでバックグラウンドで低解像度プロキシを作成
+    createPreviewProxy(file);
   });
+
 
   // Analyze
   analyzeBtn.addEventListener('click', async () => {
@@ -795,6 +806,61 @@
     } catch(e) { log("解析エラー: " + e.message); } 
     finally { analyzeBtn.disabled = false; }
   });
+
+    // オリジナルから「プレビュー用の低解像度動画」を一度だけ作る
+  async function createPreviewProxy(file) {
+    try {
+      if (!ffmpeg) {
+        await initFFmpeg();
+      }
+      const { fetchFile } = FFmpeg;
+
+      log("プレビュー用の軽量動画を作成中...");
+
+      // 入力ファイルを書き込み
+      ffmpeg.FS("writeFile", "proxy_in.src", await fetchFile(file));
+
+      const outName = "proxy_preview.mp4";
+      const args = [
+        "-i", "proxy_in.src",
+        "-vf", "scale=640:-2",    // 解像度ダウン（幅640px）
+        "-r", "24",               // フレームレートも少し落とす
+        "-c:v", "libx264",
+        "-preset", "ultrafast",   // 速度優先
+        "-crf", "30",             // 画質より軽さ
+        "-c:a", "aac",
+        "-b:a", "96k",
+        outName
+      ];
+
+      await ffmpeg.run(...args);
+
+      const data = ffmpeg.FS("readFile", outName);
+
+      // 一時ファイル削除
+      ffmpeg.FS("unlink", "proxy_in.src");
+      ffmpeg.FS("unlink", outName);
+
+      // 既存のプロキシURLがあれば解放
+      if (previewProxyUrl) {
+        URL.revokeObjectURL(previewProxyUrl);
+      }
+
+      previewProxyUrl = URL.createObjectURL(
+        new Blob([data.buffer], { type: "video/mp4" })
+      );
+
+      // プレビューはプロキシに差し替え（時間軸は同じなので currentTime はそのままでOK）
+      const currentTime = previewPlayer.currentTime || 0;
+      previewPlayer.src = previewProxyUrl;
+      previewPlayer.currentTime = currentTime;
+      log("プレビュー用軽量動画に切り替えました");
+    } catch (e) {
+      // プロキシ生成に失敗した場合はオリジナルのまま
+      console.error(e);
+      log("プレビュー用動画作成に失敗したため、オリジナルを使用します: " + e.message);
+    }
+  }
 
   async function decodeWithFFmpeg(file, audioCtx) {
     if(!ffmpeg) await initFFmpeg();
